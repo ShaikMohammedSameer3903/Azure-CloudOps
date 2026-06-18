@@ -31,8 +31,8 @@ function startDiscoveryScheduler() {
           const discovered = await discoverAllResources(sub.tenant_id, sub.id, null);
           console.log(`[DISCOVERY-SCHEDULER] Done: "${sub.name}" → ${discovered.length} resources`);
 
-          const { broadcastSSE } = require('./notificationService');
-          broadcastSSE({ type: 'resource_discovered', data: { subscriptionId: sub.id } });
+          const { broadcastToTenant } = require('../websockets/gateway');
+          broadcastToTenant(sub.tenant_id, 'RESOURCE_DISCOVERED', { subscriptionId: sub.id });
         } catch (subErr) {
           if (subErr.code === 'AZURE_NOT_CONFIGURED') {
             console.warn(`[DISCOVERY-SCHEDULER] "${sub.name}" — no credentials. Skipping.`);
@@ -84,8 +84,8 @@ async function discoverAwsAccount(accountId) {
     }
     await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [account.id]);
     
-    const { broadcastSSE } = require('./notificationService');
-    broadcastSSE({ type: 'resource_discovered', data: { accountId: account.account_id, provider: 'aws' } });
+    const { broadcastToTenant } = require('../websockets/gateway');
+    broadcastToTenant(account.tenant_id, 'RESOURCE_DISCOVERED', { accountId: account.account_id, provider: 'aws' });
 
     await db.run(`
       INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
@@ -122,8 +122,8 @@ function triggerImmediateScan(tenantId, subscriptionId, userAccessToken = null) 
   discoverAllResources(tenantId, subscriptionId, userAccessToken)
     .then((discovered) => {
       console.log(`[DISCOVERY] Immediate scan complete → ${discovered.length} resources for subId=***`);
-      const { broadcastSSE } = require('./notificationService');
-      broadcastSSE({ type: 'resource_discovered', data: { subscriptionId } });
+      const { broadcastToTenant } = require('../websockets/gateway');
+      broadcastToTenant(tenantId, 'RESOURCE_DISCOVERED', { subscriptionId });
     })
     .catch(err => {
       console.error(`[DISCOVERY] Immediate scan failed for subId=${subscriptionId}: ${err.message}`);

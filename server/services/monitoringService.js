@@ -66,7 +66,7 @@ async function getResourceMetrics(tenantId, subscriptionId, resourceId, userAcce
     });
   } catch (_) {}
 
-  const cpuTimeSeries = cpuMetrics.value?.[0]?.timeseries?.[0]?.data || [];
+  const cpuTimeSeries = cpuMetrics?.value?.[0]?.timeseries?.[0]?.data || [];
   const memTimeSeries = memoryMetrics?.value?.[0]?.timeseries?.[0]?.data || [];
   const netInTimeSeries = networkInMetrics?.value?.[0]?.timeseries?.[0]?.data || [];
   const netOutTimeSeries = networkOutMetrics?.value?.[0]?.timeseries?.[0]?.data || [];
