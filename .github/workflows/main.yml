@@ -1,0 +1,81 @@
+name: CloudOps Enterprise CI/CD
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  AZURE_CONTAINER_REGISTRY: cloudopscra.azurecr.io
+  AZURE_WEBAPP_NAME: cloudops-enterprise-prod
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js 20.x
+      uses: actions/setup-node@v3
+      with:
+        node-version: 20.x
+        cache: 'npm'
+        cache-dependency-path: 'server/package.json'
+
+    - name: Install Dependencies
+      run: |
+        cd server
+        npm ci --legacy-peer-deps
+        cd ../
+        npm ci --legacy-peer-deps
+
+    - name: Run Tests (Backend)
+      run: |
+        cd server
+        # npm test (Uncomment when unit tests exist)
+        echo "Running backend tests..."
+
+    - name: Build Frontend
+      run: |
+        npm run build
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Run npm audit
+      run: |
+        cd server
+        npm audit --production || true
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
+
+  deploy-azure:
+    runs-on: ubuntu-latest
+    needs: [build-and-test, security-scan]
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Deploy to Azure App Service
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        package: .

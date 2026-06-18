@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-09-01/policyDefinition.json",
+  "name": "enforce-resource-locks",
+  "properties": {
+    "displayName": "Enforce Resource Locks on Production Resource Groups",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Enforce CanNotDelete locks on production resource groups housing patient health data.",
+    "metadata": {
+      "category": "Governance",
+      "version": "1.0.0"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Policy Effect"
+        },
+        "allowedValues": [
+          "AuditIfNotExists",
+          "DeployIfNotExists",
+          "Disabled"
+        ],
+        "defaultValue": "AuditIfNotExists"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Resources/subscriptions/resourceGroups"
+          },
+          {
+            "field": "tags[Environment]",
+            "equals": "Production"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]",
+        "details": {
+          "type": "Microsoft.Authorization/locks",
+          "existenceCondition": {
+            "field": "Microsoft.Authorization/locks/level",
+            "equals": "CanNotDelete"
+          }
+        }
+      }
+    }
+  }
+}

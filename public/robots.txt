@@ -1,0 +1,6 @@
+# robots.txt for CloudOps Enterprise Portal
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/
+Sitemap: https://azure-cloud-ops.vercel.app/sitemap.xml

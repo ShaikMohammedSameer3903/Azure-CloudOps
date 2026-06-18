@@ -1,0 +1,24 @@
+{
+  "working": [
+    "Multi-tenant token acquisition (OAuth 2.0)",
+    "JWT Signature Validation (forged tokens rejected)",
+    "Tenant Isolation (SDK context bound to user token tenant)",
+    "Subscription discovery initialization",
+    "Resource Discovery (Real ARM API)",
+    "Cost Management APIs",
+    "Azure Monitor APIs (Client verified)",
+    "Defender for Cloud APIs",
+    "Large-Scale Resource Environments (Pagination & async iteration)",
+    "Expired token handling (API throws token validation/expired errors)",
+    "Empty subscription behavior (No mock fallback, empty arrays returned)",
+    "Azure throttling handling (HTTP 429 catcher)",
+    "Rate limiting and retries (Exponential backoff)"
+  ],
+  "failed": [
+    "Reader/Admin role behavior"
+  ],
+  "security": [],
+  "missingPermissions": [],
+  "performance": [],
+  "blockers": []
+}

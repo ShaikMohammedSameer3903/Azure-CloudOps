@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/app-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Preconnect to external origins for faster resource loading -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+    <link rel="dns-prefetch" href="https://fonts.gstatic.com" />
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" />
+    
+    <!-- Security Headers for Lighthouse Best Practices -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* wss:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://login.microsoftonline.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https: blob:; connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; worker-src 'self' blob:; frame-src 'self' https://accounts.google.com https://login.microsoftonline.com;" />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta http-equiv="Strict-Transport-Security" content="max-age=31536000; includeSubDomains" />
+    
+    <!-- Primary SEO Metadata -->
+    <title>CloudOps Enterprise - Multi-Tenant Azure Management Portal</title>
+    <meta name="description" content="Production-grade multi-tenant Azure operations platform with intelligent cost optimization, real-time activity monitoring, automated security compliance, and AI-powered insights." />
+    <meta name="keywords" content="Azure, CloudOps, Multi-Tenant, Cloud Management, Cost Optimization, SOC Dashboard, Azure Monitoring, Compliance, FinOps" />
+    <link rel="canonical" href="https://azure-cloud-ops.vercel.app" />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://azure-cloud-ops.vercel.app" />
+    <meta property="og:title" content="CloudOps Enterprise - Azure Cloud Management Portal" />
+    <meta property="og:description" content="Production-grade multi-tenant Azure operations platform with intelligent cost optimization, real-time activity monitoring, and AI-powered insights." />
+    <meta property="og:image" content="https://azure-cloud-ops.vercel.app/app-icon.png" />
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content="https://azure-cloud-ops.vercel.app" />
+    <meta property="twitter:title" content="CloudOps Enterprise - Azure Cloud Management Portal" />
+    <meta property="twitter:description" content="Production-grade multi-tenant Azure operations platform with intelligent cost optimization, real-time activity monitoring, and AI-powered insights." />
+    <meta property="twitter:image" content="https://azure-cloud-ops.vercel.app/app-icon.png" />
+
+    <!-- Structured Data: JSON-LD -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Azure CloudOps Enterprise",
+        "operatingSystem": "All",
+        "applicationCategory": "BusinessApplication",
+        "description": "Production-grade multi-tenant Azure operations platform with intelligent cost optimization and automated security compliance.",
+        "offers": {
+          "@type": "Offer",
+          "price": "0.00",
+          "priceCurrency": "USD"
+        },
+        "publisher": {
+          "@type": "Organization",
+          "name": "CloudOps Solutions",
+          "url": "https://azure-cloud-ops.vercel.app"
+        }
+      }
+    </script>
+
+    <!-- Technical SEO: Robots configuration -->
+    <meta name="robots" content="index, follow" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

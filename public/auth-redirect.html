@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Authentication — Redirecting…</title>
+  <style>
+    body {
+      margin: 0;
+      background: #0c0f1d;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #a0aec0;
+      font-size: 14px;
+    }
+    .content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      text-align: center;
+    }
+    .logo {
+      width: 40px;
+      height: 40px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 3px;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .logo span { border-radius: 2px; }
+    .spinner {
+      width: 22px;
+      height: 22px;
+      border: 2px solid rgba(255,255,255,0.1);
+      border-top-color: #0078d4;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    p { margin: 0; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="content">
+    <div class="logo">
+      <span style="background:#0078d4"></span>
+      <span style="background:#00B7C3"></span>
+      <span style="background:#107C10"></span>
+      <span style="background:#FFB900"></span>
+    </div>
+    <div class="spinner"></div>
+    <p>Completing Microsoft sign-in…</p>
+    <p style="font-size:11px;color:#4a5568;margin-top:4px">This window will close automatically.</p>
+  </div>
+
+  <!--
+    MSAL v5 Redirect Bridge
+    ========================
+    This script is the official MSAL v5 redirect bridge.
+    It handles both popup and redirect auth flows by:
+      - Popup mode: broadcasts the OAuth code via BroadcastChannel to the main window, then closes
+      - Redirect mode: navigates back to the original page with the auth response
+
+    The file is copied from:
+      node_modules/@azure/msal-browser/lib/redirect-bridge/msal-redirect-bridge.min.js
+  -->
+  <script src="/msal-redirect-bridge.min.js"></script>
+  <script>
+    // Invoke the MSAL redirect bridge to process the OAuth response
+    if (typeof msalRedirectBridge !== 'undefined' && msalRedirectBridge.broadcastResponseToMainFrame) {
+      msalRedirectBridge.broadcastResponseToMainFrame().catch(function(err) {
+        console.error('[auth-redirect] Bridge error:', err);
+        // If bridge fails, try closing the window after a delay
+        setTimeout(function() { window.close(); }, 2000);
+      });
+    } else {
+      console.warn('[auth-redirect] MSAL redirect bridge not loaded. Closing window.');
+      setTimeout(function() { window.close(); }, 2000);
+    }
+  </script>
+</body>
+</html>

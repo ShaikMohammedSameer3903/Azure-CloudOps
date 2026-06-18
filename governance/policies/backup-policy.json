@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-09-01/policyDefinition.json",
+  "name": "enforce-backup-for-vms",
+  "properties": {
+    "displayName": "Enforce Backup for Virtual Machines in Healthcare Subnets",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "description": "Enforce Azure Backup for Virtual Machines processing HIPAA-regulated healthcare data.",
+    "metadata": {
+      "category": "Backup",
+      "version": "1.0.0"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "AuditIfNotExists",
+          "DeployIfNotExists",
+          "Disabled"
+        ],
+        "defaultValue": "AuditIfNotExists"
+      },
+      "backupPolicyId": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Backup Policy ID",
+          "description": "Resource ID of the backup policy to apply to virtual machines",
+          "strongType": "Microsoft.RecoveryServices/vaults/backupPolicies"
+        }
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Compute/virtualMachines"
+          },
+          {
+            "field": "tags[Environment]",
+            "equals": "Production"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]",
+        "details": {
+          "type": "Microsoft.RecoveryServices/backups",
+          "name": "default",
+          "existenceCondition": {
+            "field": "Microsoft.RecoveryServices/backups/policyId",
+            "equals": "[parameters('backupPolicyId')]"
+          }
+        }
+      }
+    }
+  }
+}

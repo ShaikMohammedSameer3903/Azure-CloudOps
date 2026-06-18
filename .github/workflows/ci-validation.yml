@@ -1,0 +1,36 @@
+name: Production Deployment Validation & Deploy Hook
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  validate_and_build:
+    runs-on: ubuntu-latest
+    name: Lint, Test, & Build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run Build (TypeScript & Vite Verification)
+        run: npm run build
+        env:
+          VITE_API_URL: https://YOUR_BACKEND_DOMAIN.onrender.com
+          VITE_AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          VITE_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+

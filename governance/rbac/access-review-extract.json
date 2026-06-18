@@ -1,0 +1,62 @@
+[
+  {
+    "id": "ar-20260601-01",
+    "timestamp": "2026-06-01T08:00:00Z",
+    "principalName": "sarah.connor@healthcorp.onmicrosoft.com",
+    "roleName": "User Access Administrator",
+    "resourcePath": "/subscriptions/sub-hc-prod-01/resourceGroups/rg-hc-identity",
+    "pimStatus": "Activated",
+    "durationHours": 4,
+    "justification": "HIPAA semi-annual user access privilege review and credential rotations",
+    "approvedBy": "m.sameer@healthcorp.onmicrosoft.com",
+    "auditAction": "ElevatedPIMRole"
+  },
+  {
+    "id": "ar-20260601-02",
+    "timestamp": "2026-06-01T10:15:32Z",
+    "principalName": "john.doe@healthcorp.onmicrosoft.com",
+    "roleName": "Backup Contributor",
+    "resourcePath": "/subscriptions/sub-hc-prod-01/resourceGroups/rg-hc-database/providers/Microsoft.RecoveryServices/vaults/vault-prod-backups",
+    "pimStatus": "Activated",
+    "durationHours": 2,
+    "justification": "Restoration verification testing for SQL Server databases containing patient records",
+    "approvedBy": "auto-approved-policy-rules",
+    "auditAction": "ElevatedPIMRole"
+  },
+  {
+    "id": "ar-20260605-09",
+    "timestamp": "2026-06-05T14:20:11Z",
+    "principalName": "alex.smith@healthcorp.onmicrosoft.com",
+    "roleName": "Key Vault Administrator",
+    "resourcePath": "/subscriptions/sub-hc-prod-01/resourceGroups/rg-hc-security/providers/Microsoft.KeyVault/vaults/kv-hc-prod-secrets",
+    "pimStatus": "Activated",
+    "durationHours": 1,
+    "justification": "Emergency SSL certificate renewal for the patient web portal due to expiration alert",
+    "approvedBy": "m.sameer@healthcorp.onmicrosoft.com",
+    "auditAction": "ElevatedPIMRole"
+  },
+  {
+    "id": "ar-20260608-04",
+    "timestamp": "2026-06-08T09:30:00Z",
+    "principalName": "external.consultant@healthcorp.onmicrosoft.com",
+    "roleName": "Reader",
+    "resourcePath": "/subscriptions/sub-hc-prod-01",
+    "pimStatus": "Expired",
+    "durationHours": 8,
+    "justification": "Annual external security compliance audit review of Azure landing zone configurations",
+    "approvedBy": "m.sameer@healthcorp.onmicrosoft.com",
+    "auditAction": "AccessRevoked"
+  },
+  {
+    "id": "ar-20260610-12",
+    "timestamp": "2026-06-10T11:45:00Z",
+    "principalName": "jane.miller@healthcorp.onmicrosoft.com",
+    "roleName": "Security Admin",
+    "resourcePath": "/subscriptions/sub-hc-prod-01/resourceGroups/rg-hc-security",
+    "pimStatus": "Activated",
+    "durationHours": 6,
+    "justification": "Tuning Sentinel threat response playbooks and reviewing unauthorized login alerts",
+    "approvedBy": "m.sameer@healthcorp.onmicrosoft.com",
+    "auditAction": "ElevatedPIMRole"
+  }
+]

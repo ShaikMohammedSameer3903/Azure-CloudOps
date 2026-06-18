@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/app-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Authenticating...</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        background: #0c0f1d;
+        color: white;
+        font-family: system-ui, -apple-system, sans-serif;
+        gap: 16px;
+      }
+      .ms-logo {
+        width: 40px; height: 40px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 4px;
+      }
+      .ms-logo span { border-radius: 2px; }
+      .r { background: #f25022; }
+      .g { background: #7fba00; }
+      .b { background: #00a4ef; }
+      .y { background: #ffb900; }
+      h1 { font-size: 16px; font-weight: 600; color: #00B7C3; }
+      p  { font-size: 12px; color: #a0aec0; }
+    </style>
+  </head>
+  <body>
+    <div class="ms-logo">
+      <span class="r"></span>
+      <span class="g"></span>
+      <span class="b"></span>
+      <span class="y"></span>
+    </div>
+    <h1>Completing authentication...</h1>
+    <p>This window will close automatically.</p>
+    <!--
+      IMPORTANT: This script MUST be loaded as a module so Vite can bundle MSAL into it.
+      src/auth-redirect.ts calls msalInstance.initialize() which:
+        1. Detects the auth code in window.location.hash
+        2. Exchanges it with Microsoft
+        3. Posts the result to the parent window via BroadcastChannel
+        4. The parent's loginPopup() resolves and this popup closes.
+    -->
+    <script type="module" src="/src/auth-redirect.ts"></script>
+  </body>
+</html>

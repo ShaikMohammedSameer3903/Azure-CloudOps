@@ -1,0 +1,58 @@
+{
+  "name": "azure-project",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node start.cjs",
+    "dev": "vite",
+    "build": "tsc -b && vite build && node scripts/validate-build.cjs",
+    "deployment-check": "node scripts/deployment-check.cjs",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@azure/msal-browser": "^5.13.0",
+    "@azure/msal-react": "^5.4.4",
+    "@hello-pangea/dnd": "^18.0.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/auto-instrumentations-web": "^0.64.0",
+    "@opentelemetry/context-zone": "^2.8.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
+    "@opentelemetry/instrumentation-document-load": "^0.64.0",
+    "@opentelemetry/instrumentation-fetch": "^0.219.0",
+    "@opentelemetry/instrumentation-xml-http-request": "^0.219.0",
+    "@opentelemetry/sdk-trace-web": "^2.8.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.40.0",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-is": "^19.2.7",
+    "react-router-dom": "^7.17.0",
+    "recharts": "^3.8.1",
+    "socket.io-client": "^4.8.3",
+    "tailwind-merge": "^3.6.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.12.3",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.3.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.6.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.59.2",
+    "vite": "^8.0.12"
+  },
+  "overrides": {
+    "ws": "^8.21.0"
+  }
+}
