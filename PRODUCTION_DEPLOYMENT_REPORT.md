@@ -27,7 +27,7 @@ graph LR
 2.  **Backend API Layer**:
     *   **Hosting Provider**: Render (Web Service instance type)
     *   **Engine**: Node.js v18 LTS / Express
-    *   **Base URL**: `https://name-azure-cloudops-api.onrender.com`
+    *   **Base URL**: `https://azure-cloudops-api.onrender.com`
 3.  **Database Storage**:
     *   **Engine**: SQLite3
     *   **Persistence**: Persistent Disk Mount on Render (`/var/data/database.sqlite` path)
@@ -82,7 +82,7 @@ These variables must be added under **Vercel Dashboard → Project Settings → 
 
 **File Contents of `.env.production`**:
 ```ini
-VITE_API_BASE_URL=https://name-azure-cloudops-api.onrender.com
+VITE_API_BASE_URL=https://azure-cloudops-api.onrender.com
 ```
 
 ### 4.2. Build Pipeline Validation

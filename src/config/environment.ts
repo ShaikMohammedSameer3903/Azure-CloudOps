@@ -7,7 +7,7 @@
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
   (import.meta.env.PROD
-    ? 'https://name-azure-cloudops-api.onrender.com'
+    ? 'https://azure-cloudops-api.onrender.com'
     : ''); // Empty for local proxy
 
 export const CURRENT_ENV = import.meta.env.DEV ? 'Development' : 'Production';
