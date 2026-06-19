@@ -10,6 +10,22 @@ import type { User } from '../types';
 import { api } from '../services/api';
 import { useGoogleAuth } from './GoogleAuthProvider';
 import { API_BASE_URL } from '../config/environment';
+import { useAppStore } from '../store/appStore';
+import { useCloudStore } from '../store/cloudStore';
+
+export interface ProviderInfo {
+  configured: boolean;
+  clientId: string | null;
+  tenantId?: string;
+  error: string | null;
+}
+
+export interface ProvidersConfig {
+  microsoft: ProviderInfo;
+  google: ProviderInfo;
+  aws: { configured: boolean };
+  local: ProviderInfo;
+}
 
 interface AuthContextType {
   user: User | null;
@@ -26,6 +42,7 @@ interface AuthContextType {
   getAzureToken: () => Promise<string | null>;
   azureConsentMissing: boolean;
   grantAzureConsent: () => Promise<string | null>;
+  providersConfig: ProvidersConfig;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -40,12 +57,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return savedUser ? JSON.parse(savedUser) : null;
     } catch { return null; }
   });
+  const [providersConfig, setProvidersConfig] = useState<ProvidersConfig>({
+    microsoft: { configured: false, clientId: null, tenantId: 'common', error: 'Microsoft configuration loading...' },
+    google: { configured: false, clientId: null, error: 'Google configuration loading...' },
+    aws: { configured: true },
+    local: { configured: true, clientId: null, error: null }
+  });
   const [isLoading, setIsLoading] = useState(true);
   const [token, setToken] = useState<string | null>(() => {
     return localStorage.getItem('cloudops-local-token');
   });
   const [msalRedirectError, setMsalRedirectError] = useState<string | null>(null);
   const [azureConsentMissing, setAzureConsentMissing] = useState(false);
+
+  // Fetch authentication providers configuration dynamically from the backend
+  useEffect(() => {
+    let active = true;
+    const fetchProviders = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/auth/providers`);
+        if (response.ok && active) {
+          const data = await response.json();
+          setProvidersConfig(data);
+        }
+      } catch (err) {
+        console.error('[AuthProvider] Failed to fetch auth providers configuration:', err);
+      }
+    };
+    fetchProviders();
+    return () => { active = false; };
+  }, []);
 
   // Track whether we already ran the initial MSAL session sync
   const hasSyncedRef = useRef(false);
@@ -398,6 +439,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Clear all local state
     localStorage.clear();
     sessionStorage.clear();
+    useAppStore.getState().clearAllState();
+    useCloudStore.getState().clearAllState();
     setToken(null);
     setUser(null);
     hasSyncedRef.current = false; // Allow re-sync after re-login
@@ -512,6 +555,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         getAzureToken,
         azureConsentMissing,
         grantAzureConsent,
+        providersConfig,
       }}
     >
       {children}

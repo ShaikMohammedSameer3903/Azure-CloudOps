@@ -227,6 +227,9 @@ interface AppState {
   setLastUpdated: (timestamp: string) => void;
   setAutoRefreshEnabled: (enabled: boolean) => void;
   setRefreshInterval: (interval: number) => void;
+
+  // ── Reset ──
+  clearAllState: () => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -346,6 +349,32 @@ export const useAppStore = create<AppState>()(
       setLastUpdated: (lastUpdated) => set({ lastUpdated }),
       setAutoRefreshEnabled: (autoRefreshEnabled) => set({ autoRefreshEnabled }),
       setRefreshInterval: (refreshInterval) => set({ refreshInterval }),
+
+      // ── Reset ──
+      clearAllState: () => set({
+        subscriptions: [],
+        activeSubscriptionId: null,
+        activeResourceGroupId: null,
+        activeEnvironment: 'All',
+        resources: [],
+        resourceGroups: [],
+        metrics: {},
+        costSummary: null,
+        securityScore: null,
+        backupHealth: [],
+        advisorRecommendations: [],
+        riskScore: null,
+        cloudHealthScore: null,
+        defenderStatus: null,
+        serviceHealthAlerts: [],
+        governanceData: null,
+        slaData: null,
+        incidents: [],
+        notifications: [],
+        unreadCount: 0,
+        aiMessages: [],
+        globalSearchQuery: '',
+      }),
     }),
     {
       name: 'cloudops-app-store-v2',

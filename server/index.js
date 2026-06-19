@@ -181,6 +181,48 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
+app.get('/api/health/auth', async (req, res) => {
+  let dbConnected = false;
+  try {
+    const db = await getDatabase();
+    await db.get('SELECT 1');
+    dbConnected = true;
+  } catch (err) {
+    dbConnected = false;
+  }
+
+  const azureConfigured = !!(
+    process.env.AZURE_CLIENT_ID &&
+    process.env.AZURE_TENANT_ID &&
+    process.env.AZURE_CLIENT_SECRET &&
+    process.env.AZURE_SUBSCRIPTION_ID
+  );
+
+  const googleConfigured = !!(
+    (process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID) &&
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+
+  const localConfigured = !!(
+    process.env.LOCAL_ADMIN_EMAIL &&
+    process.env.LOCAL_ADMIN_PASSWORD_HASH
+  );
+
+  const environmentConfigured = !!(
+    process.env.JWT_SECRET &&
+    process.env.SESSION_SECRET &&
+    process.env.REFRESH_SECRET
+  );
+
+  res.json({
+    azure: azureConfigured,
+    google: googleConfigured,
+    local: localConfigured,
+    database: dbConnected,
+    environment: environmentConfigured
+  });
+});
+
 app.get('/api/health/diagnose', async (req, res) => {
   let dbHealthy = false;
   let activeSessionsCount = 0;
@@ -287,6 +329,106 @@ app.use(`${apiPrefix}/billing`, validateJwt, tenantContext, auditLogger, require
 app.use(`${apiPrefix}/cloud-accounts`, validateJwt, tenantContext, auditLogger, require('./routes/cloudAccounts'));
 app.use(`${apiPrefix}/approvals`, validateJwt, tenantContext, auditLogger, require('./routes/approvals'));
 app.use(`${apiPrefix}/security`, validateJwt, tenantContext, auditLogger, require('./routes/security'));
+app.use(`${apiPrefix}/sync`, validateJwt, tenantContext, auditLogger, require('./routes/sync'));
+
+// Unified isolated Dashboard API
+app.get(`${apiPrefix}/dashboard`, validateJwt, tenantContext, auditLogger, async (req, res) => {
+  try {
+    const db = await getDatabase();
+    
+    // Total resources count by provider
+    const resources = await db.all(`
+      SELECT provider, COUNT(*) as count 
+      FROM resources 
+      WHERE user_id = ? 
+      GROUP BY provider
+    `, [req.userId]);
+    
+    let totalResources = 0;
+    let azureResources = 0;
+    let awsResources = 0;
+    let gcpResources = 0;
+    
+    resources.forEach(r => {
+      const p = (r.provider || '').toLowerCase();
+      if (p === 'azure') azureResources = r.count;
+      else if (p === 'aws') awsResources = r.count;
+      else if (p === 'gcp') gcpResources = r.count;
+      totalResources += r.count;
+    });
+
+    // Cloud accounts count by provider
+    const accounts = await db.all(`
+      SELECT provider, COUNT(*) as count 
+      FROM cloud_accounts 
+      WHERE user_id = ? 
+      GROUP BY provider
+    `, [req.userId]);
+
+    let totalAccounts = 0;
+    let azureAccounts = 0;
+    let awsAccounts = 0;
+    let gcpAccounts = 0;
+
+    accounts.forEach(a => {
+      const p = (a.provider || '').toLowerCase();
+      if (p === 'azure') azureAccounts = a.count;
+      else if (p === 'aws') awsAccounts = a.count;
+      else if (p === 'gcp') gcpAccounts = a.count;
+      totalAccounts += a.count;
+    });
+
+    // Get security incidents count
+    const incidents = await db.all(`
+      SELECT severity, status FROM incidents 
+      WHERE tenant_id = ? AND user_id = ? AND category = 'Security'
+    `, [req.tenantId, req.userId]);
+
+    const openIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED').length;
+    const criticalIncidents = incidents.filter(i => i.severity === 'CRITICAL' || i.severity === 'SEV0').length;
+
+    // Calculate score
+    const awsSecurityService = require('./services/awsSecurityService');
+    const secStats = await awsSecurityService.getDashboardStats(req.tenantId, req.userId);
+
+    // Sum resource cost
+    const costRow = await db.get(`
+      SELECT SUM(cost_impact) as total_cost FROM resources WHERE user_id = ?
+    `, [req.userId]);
+    const totalCost = costRow ? (costRow.total_cost || 0) : 0;
+
+    res.json({
+      success: true,
+      userId: req.userId,
+      tenantId: req.tenantId,
+      resources: {
+        total: totalResources,
+        azure: azureResources,
+        aws: awsResources,
+        gcp: gcpResources
+      },
+      accounts: {
+        total: totalAccounts,
+        azure: azureAccounts,
+        aws: awsAccounts,
+        gcp: gcpAccounts
+      },
+      security: {
+        score: secStats.securityScore,
+        openIncidents,
+        criticalIncidents
+      },
+      cost: {
+        total: totalCost,
+        currency: 'USD'
+      }
+    });
+  } catch (err) {
+    console.error('[Dashboard API] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // These routes require Admin or SuperAdmin role
 app.use(`${apiPrefix}/admin`, require('./routes/admin'));
@@ -300,11 +442,21 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// Global Error Handler
+// Global Error Handler — uses errorClassifier for cloud errors
 app.use((err, req, res, next) => {
-  console.error('[SERVER] Global Error:', err.message || err);
-  res.status(err.status || 500).json({
-    error: err.message || 'Internal Server Error'
+  if (res.headersSent) return next(err);
+  
+  const { classifyCloudError, detectProvider } = require('./middleware/errorClassifier');
+  const provider = detectProvider(err, req, 'unknown');
+  const classified = classifyCloudError(err, provider);
+  
+  // Only use classified status if it's not a generic 502
+  const status = classified.status !== 502 ? classified.status : (err.status || 500);
+  
+  console.error(`[SERVER] Global Error (${status}):`, err.message || err);
+  res.status(status).json({
+    error: err.message || 'Internal Server Error',
+    ...classified.body
   });
 });
 
@@ -402,50 +554,8 @@ let activeServer = null;
 async function startServer() {
   try {
     // ── Environment Variable Validation ──
-    console.log('[STARTUP] Validating environment configuration...');
-    const requiredVars = [
-      { name: 'JWT_SECRET', critical: true },
-    ];
-    const optionalVars = [
-      { name: 'AZURE_CLIENT_ID', group: 'Azure' },
-      { name: 'AZURE_TENANT_ID', group: 'Azure' },
-      { name: 'AZURE_CLIENT_SECRET', group: 'Azure' },
-      { name: 'AZURE_SUBSCRIPTION_ID', group: 'Azure' },
-      { name: 'AWS_REGION', group: 'AWS' },
-      { name: 'AWS_ACCESS_KEY_ID', group: 'AWS' },
-      { name: 'AWS_SECRET_ACCESS_KEY', group: 'AWS' },
-    ];
-    
-    let hasCriticalError = false;
-    for (const v of requiredVars) {
-      if (!process.env[v.name] || process.env[v.name] === '') {
-        if (v.critical) {
-          console.warn(`[STARTUP] ⚠️  CRITICAL: ${v.name} is not set. Using fallback — NOT suitable for production.`);
-        }
-      } else {
-        console.log(`[STARTUP] ✓ ${v.name} configured`);
-      }
-    }
-    
-    const groups = {};
-    for (const v of optionalVars) {
-      if (!groups[v.group]) groups[v.group] = { configured: 0, total: 0, missing: [] };
-      groups[v.group].total++;
-      if (process.env[v.name] && process.env[v.name] !== '') {
-        groups[v.group].configured++;
-      } else {
-        groups[v.group].missing.push(v.name);
-      }
-    }
-    for (const [group, info] of Object.entries(groups)) {
-      if (info.configured === info.total) {
-        console.log(`[STARTUP] ✓ ${group} integration fully configured (${info.configured}/${info.total})`);
-      } else if (info.configured > 0) {
-        console.warn(`[STARTUP] ⚠️  ${group} partially configured (${info.configured}/${info.total}). Missing: ${info.missing.join(', ')}`);
-      } else {
-        console.log(`[STARTUP] ○ ${group} integration not configured — ${group} features will be unavailable`);
-      }
-    }
+    const { validateAuthConfig } = require('./services/authConfigValidator');
+    validateAuthConfig();
 
     // Initialize Secrets Manager first
     await secretsManager.initialize();
@@ -454,9 +564,20 @@ async function startServer() {
     await getDatabase();
     console.log('[DB] Database initialized successfully.');
 
+    // Run V12 schema migration (idempotent)
+    try {
+      const { runV12Migration } = require('./db/migrations/v12_schema');
+      await runV12Migration();
+    } catch (migErr) {
+      console.warn('[DB] V12 migration warning:', migErr.message);
+    }
+
     // Background resource discovery engine is now started dynamically upon Microsoft Entra ID Login
     const { startReportScheduler } = require('./services/reportingService');
     startReportScheduler();
+    
+    const { startJobQueue } = require('./services/jobQueue');
+    startJobQueue();
     
     const { initGateway } = require('./websockets/gateway');
 

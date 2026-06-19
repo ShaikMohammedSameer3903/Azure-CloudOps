@@ -43,32 +43,36 @@ export default function DashboardHome() {
     const fetchStats = async () => {
       setLoading(true);
       try {
-        const [resResult, costResult, secResult] = await Promise.allSettled([
+        const [resResult, azureCostResult, azureSecResult, awsCostResult, awsSecResult] = await Promise.allSettled([
           api.get<any[]>('/api/resources'),
           api.get<any>('/api/monitoring/cost/unified?provider=azure'),
           api.get<any>('/api/monitoring/security/unified?provider=azure'),
+          api.get<any>('/api/monitoring/cost/unified?provider=aws'),
+          api.get<any>('/api/monitoring/security/unified?provider=aws'),
         ]);
 
         const allResources = resResult.status === 'fulfilled' ? resResult.value : [];
-        const costData = costResult.status === 'fulfilled' ? costResult.value : null;
-        const secData = secResult.status === 'fulfilled' ? secResult.value : null;
+        const azureCostData = azureCostResult.status === 'fulfilled' ? azureCostResult.value : null;
+        const azureSecData = azureSecResult.status === 'fulfilled' ? azureSecResult.value : null;
+        const awsCostData = awsCostResult.status === 'fulfilled' ? awsCostResult.value : null;
+        const awsSecData = awsSecResult.status === 'fulfilled' ? awsSecResult.value : null;
 
         const azureRes = allResources.filter(r => (r.provider || 'azure').toLowerCase() === 'azure');
         const awsRes = allResources.filter(r => r.provider === 'aws');
 
         setAzureStats({
           resources: azureRes.length,
-          alerts: 0,
-          spend: costData?.totalCost || 0,
-          securityScore: secData?.overallScore ?? null,
+          alerts: azureSecData?.criticalAlerts || 0,
+          spend: azureCostData?.totalCost || 0,
+          securityScore: azureSecData?.overallScore ?? null,
           accounts: azureAccounts.length,
         });
 
         setAwsStats({
           resources: awsRes.length,
-          alerts: 0,
-          spend: 0,
-          securityScore: null,
+          alerts: awsSecData?.criticalAlerts || 0,
+          spend: awsCostData?.totalCost || 0,
+          securityScore: awsSecData?.overallScore ?? null,
           accounts: awsAccounts.length,
         });
       } catch (err) {
@@ -173,7 +177,7 @@ export default function DashboardHome() {
                 <StatChip icon={Server} label="Resources" value={String(azureStats.resources)} color="#0078d4" />
                 <StatChip icon={Shield} label="Security" value={azureStats.securityScore != null ? `${Math.round(azureStats.securityScore)}%` : '—'} color="#107C10" />
                 <StatChip icon={DollarSign} label="Spend" value={fmtCurrency(azureStats.spend)} color="#00B7C3" />
-                <StatChip icon={Activity} label="Status" value="Connected" color="#107C10" />
+                <StatChip icon={Activity} label="Status" value={azureAccounts.some(a => a.status === 'Failed') ? 'Failed' : 'Connected'} color={azureAccounts.some(a => a.status === 'Failed') ? '#D13438' : '#107C10'} />
               </div>
             </div>
           </button>
@@ -218,7 +222,7 @@ export default function DashboardHome() {
                 <StatChip icon={Server} label="Resources" value={String(awsStats.resources)} color="#FF9900" />
                 <StatChip icon={Shield} label="Security" value={awsStats.securityScore != null ? `${Math.round(awsStats.securityScore)}%` : '—'} color="#107C10" />
                 <StatChip icon={DollarSign} label="Spend" value={fmtCurrency(awsStats.spend)} color="#FF6600" />
-                <StatChip icon={Activity} label="Status" value="Connected" color="#107C10" />
+                <StatChip icon={Activity} label="Status" value={awsAccounts.some(a => a.status === 'Failed') ? 'Failed' : 'Connected'} color={awsAccounts.some(a => a.status === 'Failed') ? '#D13438' : '#107C10'} />
               </div>
             </div>
           </button>

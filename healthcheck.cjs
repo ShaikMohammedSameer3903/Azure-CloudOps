@@ -6,7 +6,7 @@ const http = require('http');
 
 console.log('[HEALTH] Probing backend API health...');
 
-const req = http.get('http://localhost:3001/health', (res) => {
+const req = http.get('http://127.0.0.1:3001/health', (res) => {
   let data = '';
 
   res.on('data', (chunk) => {

@@ -14,7 +14,7 @@ export const isGoogleConfigured = !!(
 
 interface GoogleAuthContextType {
   isLoaded: boolean;
-  googleLogin: () => Promise<{ email: string; name: string; googleId: string }>;
+  googleLogin: () => Promise<{ email: string; name: string; googleId: string; accessToken?: string }>;
 }
 
 const GoogleAuthContext = createContext<GoogleAuthContextType | undefined>(undefined);
@@ -38,7 +38,7 @@ export function GoogleAuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const googleLogin = (): Promise<{ email: string; name: string; googleId: string }> => {
+  const googleLogin = (): Promise<{ email: string; name: string; googleId: string; accessToken?: string }> => {
     return new Promise((resolve, reject) => {
       if (!isLoaded || !window.google) {
         reject(new Error('Google Identity Services script is not loaded yet.'));
@@ -71,7 +71,8 @@ export function GoogleAuthProvider({ children }: { children: ReactNode }) {
               resolve({
                 email: profile.email,
                 name: profile.name,
-                googleId: profile.sub
+                googleId: profile.sub,
+                accessToken: tokenResponse.access_token
               });
             } catch (err) {
               reject(err);

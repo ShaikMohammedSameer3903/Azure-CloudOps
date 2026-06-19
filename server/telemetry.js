@@ -8,20 +8,33 @@ const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumenta
 const { PrometheusExporter } = require('@opentelemetry/exporter-prometheus');
 const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-http');
 const { AzureMonitorTraceExporter } = require('@azure/monitor-opentelemetry-exporter');
-const { metrics } = require('@opentelemetry/api');
+const { metrics, diag, DiagConsoleLogger, DiagLogLevel } = require('@opentelemetry/api');
+
+// Suppress OpenTelemetry 4318 connection errors and duplicate registration logs
+diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.NONE);
+const originalError = console.error;
+console.error = (...args) => {
+  const errMsg = args[0] ? (typeof args[0] === 'string' ? args[0] : (args[0].message || args[0].toString() || '')) : '';
+  if (errMsg.includes('ECONNREFUSED') && errMsg.includes('4318')) {
+    return;
+  }
+  if (errMsg.includes('Attempted duplicate registration of API') || errMsg.includes('duplicate registration')) {
+    return;
+  }
+  originalError.apply(console, args);
+};
 
 // Expose Prometheus metrics, but prevent it from starting its own HTTP server
 // Render strictly allows only one open port per Web Service
 const metricReader = new PrometheusExporter({ preventServerStart: true });
 
-const otlpExporter = new OTLPTraceExporter({
-  url: process.env.OTLP_TRACE_URL || 'http://localhost:4318/v1/traces',
-});
-
-// Use Azure Monitor trace exporter if configured
-const traceExporter = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING 
-  ? new AzureMonitorTraceExporter({ connectionString: process.env.APPLICATIONINSIGHTS_CONNECTION_STRING })
-  : otlpExporter;
+// Use Azure Monitor trace exporter if configured, or OTLP if configured, otherwise undefined (noop)
+let traceExporter = undefined;
+if (process.env.APPLICATIONINSIGHTS_CONNECTION_STRING) {
+  traceExporter = new AzureMonitorTraceExporter({ connectionString: process.env.APPLICATIONINSIGHTS_CONNECTION_STRING });
+} else if (process.env.OTLP_TRACE_URL) {
+  traceExporter = new OTLPTraceExporter({ url: process.env.OTLP_TRACE_URL });
+}
 
 const sdk = new NodeSDK({
   traceExporter,

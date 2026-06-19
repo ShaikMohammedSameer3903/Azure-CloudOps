@@ -4,7 +4,7 @@
 
 const { getDatabase } = require('../db/database');
 
-const { broadcastToTenant } = require('../websockets/gateway');
+const { broadcastToUser } = require('../websockets/gateway');
 
 /**
  * Get all notifications for a tenant
@@ -20,7 +20,7 @@ async function getNotifications(tenantId) {
 /**
  * Create a new notification for a tenant
  */
-async function createNotification(tenantId, title, message, type) {
+async function createNotification(userId, tenantId, title, message, type) {
   const db = await getDatabase();
   const id = `notif-${Math.random().toString(36).substring(2, 11)}`;
   
@@ -30,7 +30,7 @@ async function createNotification(tenantId, title, message, type) {
   `, [id, tenantId, title, message, type]);
 
   const notif = { id, tenant_id: tenantId, title, message, type, read: 0, created_at: new Date().toISOString() };
-  broadcastToTenant(tenantId, 'NOTIFICATION', notif);
+  broadcastToUser(userId, 'NOTIFICATION', notif);
 
   return notif;
 }

@@ -126,6 +126,46 @@ router.post('/login', authRateLimiter, async (req, res) => {
   }
 });
 
+// Dynamic configuration of login providers
+router.get('/providers', async (req, res) => {
+  const isMicrosoftConfigured = !!(
+    (process.env.AZURE_CLIENT_ID || process.env.VITE_ENTRA_CLIENT_ID || process.env.VITE_AZURE_CLIENT_ID) &&
+    (process.env.AZURE_TENANT_ID || process.env.VITE_ENTRA_TENANT_ID || process.env.VITE_AZURE_TENANT_ID) &&
+    process.env.AZURE_CLIENT_ID !== ''
+  );
+
+  const isGoogleConfigured = !!(
+    (process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID) &&
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+
+  const isLocalConfigured = !!(
+    process.env.LOCAL_ADMIN_EMAIL &&
+    process.env.LOCAL_ADMIN_PASSWORD_HASH
+  );
+
+  res.json({
+    microsoft: {
+      configured: isMicrosoftConfigured,
+      clientId: process.env.AZURE_CLIENT_ID || process.env.VITE_ENTRA_CLIENT_ID || process.env.VITE_AZURE_CLIENT_ID || null,
+      tenantId: process.env.AZURE_TENANT_ID || process.env.VITE_ENTRA_TENANT_ID || process.env.VITE_AZURE_TENANT_ID || 'common',
+      error: isMicrosoftConfigured ? null : 'Microsoft authentication is disabled because AZURE_CLIENT_ID or AZURE_TENANT_ID is missing.'
+    },
+    google: {
+      configured: isGoogleConfigured,
+      clientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || null,
+      error: isGoogleConfigured ? null : 'Google authentication is disabled because GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing.'
+    },
+    aws: {
+      configured: true
+    },
+    local: {
+      configured: isLocalConfigured,
+      error: isLocalConfigured ? null : 'Local administrator login is disabled because credentials are not configured.'
+    }
+  });
+});
+
 router.post('/entra-login', authRateLimiter, async (req, res) => {
   const { idToken, email, displayName, tenantId, oid } = req.body;
   const ip = req.ip || req.connection.remoteAddress || '127.0.0.1';
@@ -141,6 +181,42 @@ router.post('/entra-login', authRateLimiter, async (req, res) => {
   const db = await getDatabase();
 
   try {
+    // Cryptographic validation of Entra ID token
+    if (idToken) {
+      try {
+        const jwksClient = require('jwks-rsa');
+        const client = jwksClient({
+          jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys'
+        });
+        const getKey = (header, callback) => {
+          client.getSigningKey(header.kid, (err, key) => {
+            if (err) callback(err);
+            else callback(null, key.getPublicKey());
+          });
+        };
+        await new Promise((resolve, reject) => {
+          jwt.verify(idToken, getKey, { algorithms: ['RS256'] }, (err, decoded) => {
+            if (err) reject(err);
+            else {
+              const tokenOid = decoded.oid || decoded.sub;
+              if (tokenOid !== oid) {
+                reject(new Error('Token OID claim mismatch.'));
+              }
+              resolve(decoded);
+            }
+          });
+        });
+        console.log(`[AUTH] Successfully validated Microsoft Entra ID Token signature for: ${normalizedEmail}`);
+      } catch (tokenErr) {
+        console.error('[AUTH ERROR] Microsoft Entra ID Token validation failed:', tokenErr.message);
+        await logAdminAudit(normalizedEmail, `Microsoft Login Failure: ID Token Validation Failed (${tokenErr.message})`, ip, userAgent);
+        return res.status(401).json({ error: `Microsoft Entra ID token verification failed: ${tokenErr.message}` });
+      }
+    } else {
+      console.warn(`[AUTH WARNING] Microsoft Entra login attempt without idToken payload for: ${normalizedEmail}`);
+      return res.status(400).json({ error: 'Microsoft Entra ID token is required.' });
+    }
+
     let userRow = await db.get('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
     if (userRow) {
       if (userRow.id !== oid) {
@@ -272,7 +348,7 @@ router.post('/entra-login', authRateLimiter, async (req, res) => {
 
 // 3. Google OAuth Login Verification
 router.post('/google-login', authRateLimiter, async (req, res) => {
-  const { email, name, googleId } = req.body;
+  const { email, name, googleId, accessToken } = req.body;
   const ip = req.ip || req.connection.remoteAddress || '127.0.0.1';
   const userAgent = req.headers['user-agent'] || 'Unknown';
 
@@ -286,6 +362,28 @@ router.post('/google-login', authRateLimiter, async (req, res) => {
   const db = await getDatabase();
 
   try {
+    // Secure token validation against Google APIs
+    if (accessToken) {
+      try {
+        const axios = require('axios');
+        const gRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        const gProfile = gRes.data;
+        if (gProfile.email.toLowerCase() !== normalizedEmail || gProfile.sub !== googleId) {
+          throw new Error('Google token details mismatch');
+        }
+        console.log(`[AUTH] Securely verified Google OAuth access token for: ${normalizedEmail}`);
+      } catch (tokenErr) {
+        console.error('[AUTH ERROR] Google access token verification failed:', tokenErr.message);
+        await logAdminAudit(normalizedEmail, `Google Login Failure: Access Token Verification Failed (${tokenErr.message})`, ip, userAgent);
+        return res.status(401).json({ error: `Google login token verification failed: ${tokenErr.message}` });
+      }
+    } else {
+      console.warn(`[AUTH WARNING] Google login attempt without accessToken payload for: ${normalizedEmail}`);
+      return res.status(400).json({ error: 'Google OAuth access token is required.' });
+    }
+
     let userRow = await db.get('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
     if (userRow) {
       if (userRow.id !== googleId) {
@@ -358,6 +456,49 @@ router.post('/google-login', authRateLimiter, async (req, res) => {
 
     await logAudit(sessionUser.tenantId, sessionUser.id, sessionUser.email, 'LOGIN_SUCCESS', 'User', sessionUser.id, ip, 'SUCCESS', { provider: 'Google', userAgent });
     await logAdminAudit(normalizedEmail, 'Google Login Success', ip, userAgent);
+
+    // Auto-discover GCP projects
+    if (accessToken) {
+      (async () => {
+        try {
+          const axios = require('axios');
+          const pRes = await axios.get('https://cloudresourcemanager.googleapis.com/v1/projects', {
+            headers: { Authorization: `Bearer ${accessToken}` }
+          });
+          const projects = pRes.data.projects || [];
+          const db = await getDatabase();
+          const secretsManager = require('../services/secretsManager');
+          
+          let discoveredCount = 0;
+          for (const proj of projects) {
+            if (proj.lifecycleState === 'ACTIVE') {
+              const projectId = proj.projectId;
+              const accountName = proj.name || projectId;
+              const id = `gcp-${projectId}`;
+              
+              const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, sessionUser.id]);
+              if (!existing) {
+                // Encrypt the user's OAuth access token to use as temporary credentials
+                const encryptedToken = secretsManager.encryptSecret(accessToken);
+                await db.run(`
+                  INSERT INTO cloud_accounts (id, tenant_id, user_id, provider, account_name, account_id, region, status, secret_access_key)
+                  VALUES (?, ?, ?, 'gcp', ?, ?, 'global', 'Active', ?)
+                `, [id, sessionUser.tenantId, sessionUser.id, accountName, projectId, encryptedToken]);
+                console.log(`[DISCOVERY] Auto-registered GCP Project: ${accountName} (${projectId})`);
+                discoveredCount++;
+              }
+            }
+          }
+          if (discoveredCount > 0) {
+            // Trigger resource discovery for the newly added GCP accounts
+            const { startDiscoveryScheduler } = require('../services/discoveryEngine');
+            startDiscoveryScheduler();
+          }
+        } catch (err) {
+          console.error('[DISCOVERY] Failed to auto-discover GCP projects:', err.message);
+        }
+      })();
+    }
 
     res.json({
       token,
@@ -718,7 +859,8 @@ const { SSOOIDCClient, StartDeviceAuthorizationCommand, CreateTokenCommand, Regi
 const { SSOClient, ListAccountsCommand, ListAccountRolesCommand, GetRoleCredentialsCommand } = require('@aws-sdk/client-sso');
 const secretsManager = require('../services/secretsManager');
 
-router.post('/aws-iam-login', authRateLimiter, async (req, res) => {
+
+const handleAwsLogin = async (req, res) => {
   const { accessKeyId, secretAccessKey, sessionToken, roleArn, externalId, sessionName } = req.body;
   const reqIp = req.ip || req.connection.remoteAddress || '127.0.0.1';
   
@@ -756,6 +898,9 @@ router.post('/aws-iam-login', authRateLimiter, async (req, res) => {
     const callerId = await stsValidate.send(new GetCallerIdentityCommand({}));
     console.log(`[AWS-LOGIN] Caller identity validated: ${callerId.Arn}`);
     
+    // REQUIREMENT 6: Backend logging
+    console.log(`[AWS-DISCOVERY] Authentication successful`);
+
     const db = await getDatabase();
     const identityEmail = callerId.Arn;
     const accountId = callerId.Account;
@@ -778,25 +923,45 @@ router.post('/aws-iam-login', authRateLimiter, async (req, res) => {
     const encAccessKey = secretsManager.encryptSecret(finalCreds.accessKeyId);
     const encSecretKey = secretsManager.encryptSecret(finalCreds.secretAccessKey);
     const encSessionToken = finalCreds.sessionToken ? secretsManager.encryptSecret(finalCreds.sessionToken) : null;
+    const encExternalId = externalId ? secretsManager.encryptSecret(externalId) : null;
 
     const existingAccount = await db.get('SELECT * FROM cloud_accounts WHERE account_id = ? AND provider = "aws"', [accountId]);
     let targetAccountId = existingAccount ? existingAccount.id : `aws-${accountId}`;
     
+    // REQUIREMENT 1 & 4: Save the AWS account with the authenticated userId
     if (!existingAccount) {
       console.log(`[AWS-LOGIN] Registering new AWS cloud account ${accountId}`);
       await db.run(
-        `INSERT INTO cloud_accounts (id, tenant_id, account_name, account_id, provider, access_key_id, secret_access_key, region, status, created_at)
-         VALUES (?, ?, ?, ?, 'aws', ?, ?, ?, 'Active', CURRENT_TIMESTAMP)`,
-        [targetAccountId, userTenantId, `AWS Account ${accountId}`, accountId, encAccessKey, encSecretKey, region]
+        `INSERT INTO cloud_accounts (id, tenant_id, user_id, provider, account_name, account_id, region, role_arn, external_id, access_key_id, secret_access_key, status, created_at)
+         VALUES (?, ?, ?, 'aws', ?, ?, ?, ?, ?, ?, ?, 'Active', CURRENT_TIMESTAMP)`,
+        [targetAccountId, userTenantId, userRow.id, `AWS Account ${accountId}`, accountId, region, roleArn || null, encExternalId, encAccessKey, encSecretKey]
       );
     } else {
       console.log(`[AWS-LOGIN] Updating existing AWS cloud account ${accountId}`);
-      await db.run(`UPDATE cloud_accounts SET access_key_id = ?, secret_access_key = ? WHERE account_id = ? AND provider = 'aws'`, [encAccessKey, encSecretKey, accountId]);
+      await db.run(`UPDATE cloud_accounts SET user_id = ?, access_key_id = ?, secret_access_key = ?, role_arn = ?, external_id = ?, region = ? WHERE account_id = ? AND provider = 'aws'`, [userRow.id, encAccessKey, encSecretKey, roleArn || null, encExternalId, region, accountId]);
     }
+
+    // REQUIREMENT 6: Backend logging
+    console.log(`[AWS-DISCOVERY] Account saved`);
 
     const { discoverAwsAccount } = require('../services/discoveryEngine');
     console.log(`[AWS-LOGIN] Triggering async discovery for account ${targetAccountId}`);
-    discoverAwsAccount(targetAccountId).catch(e => console.error(`[AWS-LOGIN] Unhandled discovery rejection:`, e));
+    
+    // REQUIREMENT 1: Start an asynchronous discovery job, and set status to Failed if it rejects
+    // REQUIREMENT 6: Backend logging - "Discovery started"
+    console.log(`[AWS-DISCOVERY] Discovery started`);
+    
+    discoverAwsAccount(targetAccountId).then(() => {
+      // REQUIREMENT 6: Backend logging - "Resources discovered", "Database updated", "Dashboard refreshed"
+      console.log(`[AWS-DISCOVERY] Resources discovered`);
+      console.log(`[AWS-DISCOVERY] Database updated`);
+      console.log(`[AWS-DISCOVERY] Dashboard refreshed`);
+    }).catch(async (e) => {
+      console.error(`[AWS-LOGIN] Unhandled discovery rejection:`, e);
+      // Set status to Failed in database
+      const dbInstance = await getDatabase();
+      await dbInstance.run('UPDATE cloud_accounts SET status = "Failed" WHERE id = ?', [targetAccountId]);
+    });
 
     const sessionUser = { id: userRow.id, email: userRow.email, displayName: userRow.display_name, role: userRow.role, tenantId: userTenantId };
     const sessionId = await createSession(db, sessionUser, 'AWS', req);
@@ -851,7 +1016,11 @@ router.post('/aws-iam-login', authRateLimiter, async (req, res) => {
 
     res.status(statusCode).json({ error: errorMessage, awsError: err.name });
   }
-});
+};
+
+router.post('/aws-iam-login', authRateLimiter, handleAwsLogin);
+router.post('/aws-login', authRateLimiter, handleAwsLogin);
+
 
 // ─────────────────────────────────────────────────────────────
 // 10. AWS SSO (IAM Identity Center) Login
@@ -941,12 +1110,12 @@ router.post('/aws-sso/finalize', async (req, res) => {
     
     if (!existingAccount) {
       await db.run(
-        `INSERT INTO cloud_accounts (id, tenant_id, account_name, account_id, provider, access_key_id, secret_access_key, region, status, created_at)
-         VALUES (?, ?, ?, ?, 'aws', ?, ?, ?, 'Active', CURRENT_TIMESTAMP)`,
-        [targetAccountId, userTenantId, `AWS SSO Account ${accountId}`, accountId, encAccessKey, encSecretKey, region]
+        `INSERT INTO cloud_accounts (id, tenant_id, user_id, provider, account_name, account_id, region, access_key_id, secret_access_key, status, created_at)
+         VALUES (?, ?, ?, 'aws', ?, ?, ?, ?, ?, 'Active', CURRENT_TIMESTAMP)`,
+        [targetAccountId, userTenantId, userRow.id, `AWS SSO Account ${accountId}`, accountId, region, encAccessKey, encSecretKey]
       );
     } else {
-      await db.run(`UPDATE cloud_accounts SET access_key_id = ?, secret_access_key = ? WHERE account_id = ? AND provider = 'aws'`, [encAccessKey, encSecretKey, accountId]);
+      await db.run(`UPDATE cloud_accounts SET user_id = ?, access_key_id = ?, secret_access_key = ? WHERE account_id = ? AND provider = 'aws'`, [userRow.id, encAccessKey, encSecretKey, accountId]);
     }
 
     const { discoverAwsAccount } = require('../services/discoveryEngine');

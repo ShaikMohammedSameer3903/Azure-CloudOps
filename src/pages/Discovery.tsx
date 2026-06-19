@@ -44,7 +44,7 @@ export default function DiscoveryPage() {
     } catch (err) {
       console.warn('Failed to save onboarding state');
     }
-    handleSuccess();
+    setStep('success');
   };
 
   const handleAzureDiscovery = async () => {

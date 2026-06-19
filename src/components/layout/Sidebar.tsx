@@ -43,6 +43,15 @@ const awsNavItems = [
   { id: 'aws-reports',    label: 'Reports',          icon: FileBarChart,    path: '/aws/reports' },
 ];
 
+// ── GCP Navigation ──
+const gcpNavItems = [
+  { id: 'gcp-dash',       label: 'Dashboard',       icon: LayoutDashboard, path: '/gcp' },
+  { id: 'gcp-resources',  label: 'Resources',       icon: Server,          path: '/gcp/resources' },
+  { id: 'gcp-security',   label: 'Security',        icon: ShieldAlert,     path: '/gcp/security' },
+  { id: 'gcp-cost',       label: 'Cost',            icon: DollarSign,      path: '/gcp/cost' },
+  { id: 'gcp-monitoring', label: 'Monitoring',      icon: Activity,        path: '/gcp/monitoring' },
+];
+
 // ── Multi-Cloud Navigation ──
 const multiCloudNavItems = [
   { id: 'mc-executive',   label: 'Executive View',    icon: LayoutDashboard, path: '/multicloud' },
@@ -60,11 +69,12 @@ const commonNavItems = [
   { id: 'settings',     label: 'Settings',         icon: Settings,      path: '/settings' },
 ];
 
-type ActiveSection = 'home' | 'azure' | 'aws' | 'multicloud' | 'other';
+type ActiveSection = 'home' | 'azure' | 'aws' | 'gcp' | 'multicloud' | 'other';
 
 function getActiveSection(pathname: string): ActiveSection {
   if (pathname.startsWith('/azure')) return 'azure';
   if (pathname.startsWith('/aws')) return 'aws';
+  if (pathname.startsWith('/gcp')) return 'gcp';
   if (pathname.startsWith('/multicloud')) return 'multicloud';
   if (pathname === '/') return 'home';
   return 'other';
@@ -97,6 +107,7 @@ export default function Sidebar() {
 
   const hasAzure = cloudAccounts.some(a => a.provider === 'azure');
   const hasAws = cloudAccounts.some(a => a.provider === 'aws');
+  const hasGcp = cloudAccounts.some(a => a.provider === 'gcp');
 
   const renderNavGroup = (title: string, items: typeof azureNavItems, providerColor?: string) => (
     <>
@@ -164,6 +175,7 @@ export default function Sidebar() {
               {/* Context-Aware Cloud Navigation */}
               {activeSection === 'azure' && renderNavGroup('Azure', azureNavItems, '#0078d4')}
               {activeSection === 'aws' && renderNavGroup('AWS', awsNavItems, '#FF9900')}
+              {activeSection === 'gcp' && renderNavGroup('GCP', gcpNavItems, '#4285F4')}
               {activeSection === 'multicloud' && renderNavGroup('Multi-Cloud', multiCloudNavItems, '#8b5cf6')}
 
               {/* When on home or other pages, show cloud entry points */}
@@ -193,7 +205,19 @@ export default function Sidebar() {
                       </NavLink>
                     </>
                   )}
-                  {(hasAzure || hasAws) && (
+                  {hasGcp && (
+                    <>
+                      <div className="sidebar-section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#4285F4', flexShrink: 0 }} />
+                        GCP
+                      </div>
+                      <NavLink to="/gcp" className="sidebar-item" aria-label="Navigate to GCP Dashboard" onClick={() => setMobileSidebarOpen(false)}>
+                        <span className="sidebar-item-icon"><Database size={17} strokeWidth={1.8} /></span>
+                        <span className="sidebar-item-label">GCP Dashboard</span>
+                      </NavLink>
+                    </>
+                  )}
+                  {(hasAzure || hasAws || hasGcp) && (
                     <>
                       <div className="sidebar-section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#8b5cf6', flexShrink: 0 }} />

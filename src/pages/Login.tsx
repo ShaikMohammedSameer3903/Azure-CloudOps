@@ -51,19 +51,6 @@ const landingFeatures = [
   }
 ];
 
-// Check configuration status of providers
-const isMicrosoftConfigured = !!(
-  import.meta.env.VITE_AZURE_CLIENT_ID &&
-  import.meta.env.VITE_AZURE_CLIENT_ID.trim() !== '' &&
-  !import.meta.env.VITE_AZURE_CLIENT_ID.includes('YOUR_')
-);
-
-const isGoogleConfigured = !!(
-  import.meta.env.VITE_GOOGLE_CLIENT_ID &&
-  import.meta.env.VITE_GOOGLE_CLIENT_ID.trim() !== '' &&
-  !import.meta.env.VITE_GOOGLE_CLIENT_ID.includes('YOUR_')
-);
-
 // Map raw OAuth errors to clear, friendly user notifications
 const getFriendlyError = (errStr: string): MappedError => {
   const normalized = errStr.toLowerCase();
@@ -149,8 +136,11 @@ const getFriendlyError = (errStr: string): MappedError => {
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { login, loginWithGoogle, isAuthenticated, isLoading, msalRedirectError, user } = useAuth();
+  const { login, loginWithGoogle, isAuthenticated, isLoading, msalRedirectError, user, providersConfig } = useAuth();
   const { inProgress } = useMsal();
+
+  const isMicrosoftConfigured = providersConfig?.microsoft?.configured ?? false;
+  const isGoogleConfigured = providersConfig?.google?.configured ?? false;
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');

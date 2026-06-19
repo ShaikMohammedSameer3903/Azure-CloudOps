@@ -9,6 +9,7 @@ const { getDatabase } = require('../db/database');
 const ProviderFactory = require('../providers/ProviderFactory');
 const AwsCredentialManager = require('../providers/aws/AwsCredentialManager');
 const secretsManager = require('../services/secretsManager');
+const { enqueueJob } = require('../services/jobQueue');
 
 // ─────────────────────────────────────────────────────────
 // GET /api/cloud-accounts — List all accounts for tenant
@@ -16,13 +17,8 @@ const secretsManager = require('../services/secretsManager');
 router.get('/', async (req, res) => {
   try {
     const db = await getDatabase();
-    let query = 'SELECT id, tenant_id, user_id, provider, account_name, subscription_id, account_id, region, status, last_sync, created_at FROM cloud_accounts WHERE tenant_id = ?';
-    const params = [req.tenantId];
-
-    if (req.userRole !== 'Admin' && req.userRole !== 'SuperAdmin') {
-      query += ' AND user_id = ?';
-      params.push(req.userId);
-    }
+    let query = 'SELECT id, tenant_id, user_id, provider, account_name, subscription_id, account_id, region, status, last_sync, created_at FROM cloud_accounts WHERE user_id = ?';
+    const params = [req.userId];
 
     const accounts = await db.all(query, params);
     // Never return secrets (access_key_id, secret_access_key, role_arn) in list view
@@ -35,7 +31,7 @@ router.get('/', async (req, res) => {
 // ─────────────────────────────────────────────────────────
 // POST /api/cloud-accounts/azure — Add Azure Account
 // ─────────────────────────────────────────────────────────
-router.post('/azure', async (req, res) => {
+const handleAzureAccountAdd = async (req, res) => {
   const { subscriptionId, accountName, azureTenantId, clientId, clientSecret } = req.body;
   if (!subscriptionId || !accountName) {
     return res.status(400).json({ error: 'Missing required fields: subscriptionId, accountName' });
@@ -45,8 +41,7 @@ router.post('/azure', async (req, res) => {
   try {
     const db = await getDatabase();
 
-    // Check for duplicate
-    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ?', [id]);
+    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
     if (existing) {
       return res.status(200).json({
         success: true,
@@ -75,14 +70,16 @@ router.post('/azure', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+};
+
+router.post('/azure', handleAzureAccountAdd);
 
 // ─────────────────────────────────────────────────────────
 // POST /api/cloud-accounts/aws — Add AWS Account
 // Supports: IAM Role (AssumeRole) > Access Keys
 // Validates connection before saving
 // ─────────────────────────────────────────────────────────
-router.post('/aws', async (req, res) => {
+const handleAwsAccountAdd = async (req, res) => {
   console.log("AWS Discovery Request Body:", {
     accountName: req.body.accountName,
     region: req.body.region,
@@ -167,8 +164,7 @@ router.post('/aws', async (req, res) => {
   try {
     const db = await getDatabase();
 
-    // Check for duplicate
-    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ?', [id]);
+    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
     if (existing) {
       return res.status(200).json({
         success: true,
@@ -211,12 +207,14 @@ router.post('/aws', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+};
+
+router.post('/aws', handleAwsAccountAdd);
 
 // ─────────────────────────────────────────────────────────
 // POST /api/cloud-accounts/gcp — Add GCP Account
 // ─────────────────────────────────────────────────────────
-router.post('/gcp', async (req, res) => {
+const handleGcpAccountAdd = async (req, res) => {
   const { projectId, accountName, serviceAccountJson } = req.body;
   
   if (!projectId || !accountName || !serviceAccountJson) {
@@ -226,7 +224,7 @@ router.post('/gcp', async (req, res) => {
   const id = `gcp-${projectId}`;
   try {
     const db = await getDatabase();
-    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ?', [id]);
+    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
     if (existing) {
       return res.status(200).json({
         success: true,
@@ -240,14 +238,37 @@ router.post('/gcp', async (req, res) => {
     const encryptedSecret = secretsManager.encryptSecret(serviceAccountJson);
 
     await db.run(`
-      INSERT INTO cloud_accounts (id, tenant_id, provider, account_name, account_id, region, status, secret_access_key)
-      VALUES (?, ?, 'gcp', ?, ?, 'global', 'Active', ?)
-    `, [id, req.tenantId, accountName, projectId, encryptedSecret]);
+      INSERT INTO cloud_accounts (id, tenant_id, user_id, provider, account_name, account_id, region, status, secret_access_key)
+      VALUES (?, ?, ?, 'gcp', ?, ?, 'global', 'Active', ?)
+    `, [id, req.tenantId, req.userId, accountName, projectId, encryptedSecret]);
 
     console.log(`[CloudAccounts] GCP account connected: ${accountName} (${projectId})`);
     res.status(201).json({ id, provider: 'gcp', accountName, projectId });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+};
+
+router.post('/gcp', handleGcpAccountAdd);
+
+// ─────────────────────────────────────────────────────────
+// POST /api/cloud-accounts — Add Account dynamic dispatcher
+// ─────────────────────────────────────────────────────────
+router.post('/', async (req, res) => {
+  const { provider } = req.body;
+  if (!provider) {
+    return res.status(400).json({ error: 'provider is required' });
+  }
+
+  const prov = provider.toLowerCase();
+  if (prov === 'aws') {
+    return handleAwsAccountAdd(req, res);
+  } else if (prov === 'azure') {
+    return handleAzureAccountAdd(req, res);
+  } else if (prov === 'gcp') {
+    return handleGcpAccountAdd(req, res);
+  } else {
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 });
 
@@ -258,12 +279,8 @@ router.post('/:id/test', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND tenant_id = ?';
-    const params = [id, req.tenantId];
-    if (req.userRole !== 'Admin' && req.userRole !== 'SuperAdmin') {
-      query += ' AND user_id = ?';
-      params.push(req.userId);
-    }
+    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?';
+    const params = [id, req.userId];
     const account = await db.get(query, params);
     if (!account) return res.status(404).json({ error: 'Cloud account not found' });
 
@@ -292,49 +309,48 @@ router.post('/:id/sync', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND tenant_id = ?';
-    const params = [id, req.tenantId];
-    if (req.userRole !== 'Admin' && req.userRole !== 'SuperAdmin') {
-      query += ' AND user_id = ?';
-      params.push(req.userId);
-    }
+    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?';
+    const params = [id, req.userId];
     const account = await db.get(query, params);
     if (!account) return res.status(404).json({ error: 'Cloud account not found' });
 
-    const providerInstance = ProviderFactory.getProvider(account);
-    const resources = await providerInstance.getResources();
+    const opId = await enqueueJob(
+      account.tenant_id,
+      req.userId,
+      req.userEmail,
+      account.id,
+      `Sync Cloud Account: ${account.account_name} (${account.provider})`
+    );
 
-    // Upsert resources into the resources table
-    for (const resource of resources) {
-      await db.run(`
-        INSERT OR REPLACE INTO resources (id, name, type, region, status, provider, tags, resource_group, subscription_id, cloud_account_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        resource.id,
-        resource.name,
-        resource.type,
-        resource.region,
-        resource.status,
-        resource.provider,
-        JSON.stringify(resource.tags || {}),
-        resource.resourceGroup || null,
-        account.id,
-        account.id,
-      ]);
-    }
-
-    // Update last_sync timestamp
-    await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [id]);
-
-    console.log(`[CloudAccounts] Synced ${resources.length} resources for ${account.account_name} (${account.provider})`);
+    console.log(`[CloudAccounts] Sync queued for ${account.account_name} (${account.provider})`);
     res.json({
       status: 'success',
-      syncedCount: resources.length,
+      message: 'Sync job queued in background',
+      operationId: opId,
       provider: account.provider,
-      lastSync: new Date().toISOString(),
     });
   } catch (err) {
     console.error(`[CloudAccounts] Sync failed for ${id}:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// POST /api/cloud-accounts/:id/discover — Discover resources immediately
+// ─────────────────────────────────────────────────────────
+router.post('/:id/discover', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const db = await getDatabase();
+    const account = await db.get('SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
+    if (!account) return res.status(404).json({ error: 'Cloud account not found or access denied.' });
+
+    // Start discovery asynchronously
+    const { discoverCloudAccount } = require('../services/discoveryEngine');
+    discoverCloudAccount(req.tenantId, id).catch(e => console.error(`[DISCOVERY] Async discovery failed for ${id}:`, e.message));
+
+    res.json({ success: true, message: 'Discovery started asynchronously.' });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -346,12 +362,8 @@ router.post('/:id/refresh', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND tenant_id = ?';
-    const params = [id, req.tenantId];
-    if (req.userRole !== 'Admin' && req.userRole !== 'SuperAdmin') {
-      query += ' AND user_id = ?';
-      params.push(req.userId);
-    }
+    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?';
+    const params = [id, req.userId];
     const account = await db.get(query, params);
     if (!account) return res.status(404).json({ error: 'Cloud account not found' });
 
@@ -392,14 +404,14 @@ router.delete('/:id', async (req, res) => {
     const account = await db.get(query, params);
     if (!account) return res.status(404).json({ error: 'Cloud account not found' });
 
-    await db.run('DELETE FROM cloud_accounts WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
+    await db.run('DELETE FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
 
     // Clean up resources associated with this account
     await db.run('DELETE FROM resources WHERE subscription_id = ?', [account.subscription_id || account.account_id]);
 
     // Also remove from azure_subscriptions for backwards compatibility
     if (account.provider === 'azure') {
-      await db.run('DELETE FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
+      await db.run('DELETE FROM azure_subscriptions WHERE id = ? AND user_id = ?', [id, req.userId]);
     }
 
     console.log(`[CloudAccounts] Removed ${account.provider} account: ${account.account_name}`);

@@ -189,11 +189,13 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children, allowe
   
   // Only redirect to welcome if: no accounts loaded, hasn't skipped, not already on setup page,
   // AND the user is NOT a cloud provider user (who will have accounts loaded momentarily)
+  // Give cloud provider users a short grace period, but if they explicitly go to /welcome, allow it.
   if (!hasAnyAccounts && !hasSkippedOnboarding && !isSetupPage && !isCloudProviderUser) {
     return <Navigate to="/welcome" replace />;
   }
 
-  if ((hasAnyAccounts || hasSkippedOnboarding || isCloudProviderUser) && isSetupPage) {
+  // If they have accounts or skipped onboarding, they shouldn't be on the setup page.
+  if ((hasAnyAccounts || hasSkippedOnboarding) && isSetupPage) {
     return <Navigate to="/" replace />;
   }
 

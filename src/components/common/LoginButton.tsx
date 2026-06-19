@@ -18,29 +18,20 @@ export const LoginButton: React.FC<LoginButtonProps> = ({
   onFailure,
   style,
 }) => {
-  const { login, loginWithGoogle, isLoading } = useAuth();
+  const { login, loginWithGoogle, isLoading, providersConfig } = useAuth();
   const { inProgress } = useMsal();
   const [localLoading, setLocalLoading] = React.useState(false);
 
-  const isMicrosoftConfigured = !!(
-    import.meta.env.VITE_AZURE_CLIENT_ID &&
-    import.meta.env.VITE_AZURE_CLIENT_ID.trim() !== '' &&
-    !import.meta.env.VITE_AZURE_CLIENT_ID.includes('YOUR_')
-  );
-
-  const isGoogleConfigured = !!(
-    import.meta.env.VITE_GOOGLE_CLIENT_ID &&
-    import.meta.env.VITE_GOOGLE_CLIENT_ID.trim() !== '' &&
-    !import.meta.env.VITE_GOOGLE_CLIENT_ID.includes('YOUR_')
-  );
+  const isMicrosoftConfigured = providersConfig?.microsoft?.configured ?? false;
+  const isGoogleConfigured = providersConfig?.google?.configured ?? false;
 
   const handleLogin = async () => {
     if (provider === 'microsoft' && !isMicrosoftConfigured) {
-      onFailure?.('Microsoft authentication is not configured.');
+      onFailure?.(providersConfig?.microsoft?.error || 'Microsoft authentication is not configured.');
       return;
     }
     if (provider === 'google' && !isGoogleConfigured) {
-      onFailure?.('Google authentication is not configured.');
+      onFailure?.(providersConfig?.google?.error || 'Google authentication is not configured.');
       return;
     }
     if (provider === 'aws') {

@@ -18,8 +18,6 @@ router.get('/', async (req, res) => {
   const { subscriptionId, resourceGroup, type, location } = req.query;
   try {
     const db = await getDatabase();
-    const isAdmin = ADMIN_ROLES.includes((req.userRole || '').toLowerCase());
-
     // Build query scoped to the user's accessible tenant (tenant isolation)
     let query = `
       SELECT r.*, 
@@ -33,14 +31,9 @@ router.get('/', async (req, res) => {
       FROM resources r
       LEFT JOIN cloud_accounts c ON r.cloud_account_id = c.id
       LEFT JOIN azure_subscriptions a ON r.subscription_id = a.id
-      WHERE (c.tenant_id = ? OR a.tenant_id = ?)`;
+      WHERE (c.user_id = ? OR a.user_id = ?)`;
 
-    let params = [req.tenantId, req.tenantId];
-
-    if (!isAdmin) {
-      query += ` AND (c.user_id = ? OR a.user_id = ?)`;
-      params.push(req.userId, req.userId);
-    }
+    let params = [req.userId, req.userId];
 
     if (subscriptionId) {
       // subscriptionId in the query could mean account_id for AWS or subscription_id for Azure
@@ -107,9 +100,9 @@ router.post('/create', async (req, res) => {
     const resourceId = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup || name}/providers/Microsoft.${type}/${name}`;
     
     await db.run(`
-      INSERT INTO resources (id, subscription_id, resource_group, name, type, location, status, tags, raw_payload)
-      VALUES (?, ?, ?, ?, ?, ?, 'Active', '{}', '{}')
-    `, [resourceId, subscriptionId, resourceGroup || name, name, `Microsoft.${type}`, location || 'eastus']);
+      INSERT INTO resources (id, subscription_id, user_id, resource_group, name, type, location, status, tags, raw_payload)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', '{}', '{}')
+    `, [resourceId, subscriptionId, req.userId, resourceGroup || name, name, `Microsoft.${type}`, location || 'eastus']);
 
     await logAudit(req.tenantId, req.userId, req.userEmail, 'CREATE_RESOURCE', `Microsoft.${type}`, resourceId, req.ip, 'SUCCESS', { name });
     res.json({ success: true, resourceId });
@@ -126,9 +119,18 @@ router.post('/delete', async (req, res) => {
   }
   const db = await getDatabase();
   try {
-    const resRow = await db.get('SELECT * FROM resources WHERE id = ?', [resourceId]);
+    const resRow = await db.get('SELECT * FROM resources WHERE id = ? AND user_id = ?', [resourceId, req.userId]);
     if (!resRow) {
-      return res.status(404).json({ error: 'Resource not found' });
+      // Check if it belongs to a subscription owned by user
+      const joinCheck = await db.get(`
+        SELECT r.id FROM resources r
+        LEFT JOIN cloud_accounts c ON r.cloud_account_id = c.id
+        LEFT JOIN azure_subscriptions a ON r.subscription_id = a.id
+        WHERE r.id = ? AND (c.user_id = ? OR a.user_id = ? OR r.user_id = ?)
+      `, [resourceId, req.userId, req.userId, req.userId]);
+      if (!joinCheck) {
+        return res.status(404).json({ error: 'Resource not found or access denied' });
+      }
     }
 
     await db.run('DELETE FROM resources WHERE id = ?', [resourceId]);
@@ -156,23 +158,13 @@ router.get('/groups/:subscriptionId', async (req, res) => {
 router.get('/regions', async (req, res) => {
   try {
     const db = await getDatabase();
-    const isAdmin = ADMIN_ROLES.includes((req.userRole || '').toLowerCase());
-    
     let query = `
       SELECT c.provider, c.account_id, COALESCE(r.region, r.location) as region, COUNT(r.id) as count
       FROM resources r
       LEFT JOIN cloud_accounts c ON r.cloud_account_id = c.id
-      WHERE `;
+      WHERE c.user_id = ?`;
       
-    let params = [];
-    if (isAdmin) {
-      query += `c.tenant_id = ?`;
-      params.push(req.tenantId);
-    } else {
-      // user boundary
-      query += `c.tenant_id = ? AND c.user_id = ?`;
-      params.push(req.tenantId, req.userId);
-    }
+    let params = [req.userId];
     
     query += ` GROUP BY c.provider, c.account_id, COALESCE(r.region, r.location) ORDER BY count DESC`;
     

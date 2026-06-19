@@ -42,7 +42,7 @@ function bootstrapEnv() {
   // 2. Check/Generate Local Admin Credentials
   let generatedPassword = null;
   if (!envVars.LOCAL_ADMIN_EMAIL) {
-    envVars.LOCAL_ADMIN_EMAIL = 'shaiksameer3909sam@gmail.com';
+    envVars.LOCAL_ADMIN_EMAIL = 'admin@cloudops-local.com';
     envUpdated = true;
   }
   if (!envVars.LOCAL_ADMIN_PASSWORD_HASH) {
@@ -51,15 +51,29 @@ function bootstrapEnv() {
     const hash = bcrypt.hashSync(generatedPassword, salt);
     envVars.LOCAL_ADMIN_PASSWORD_HASH = hash;
     envUpdated = true;
+  } else {
+    // If password hash is plaintext, hash it!
+    const hashVal = envVars.LOCAL_ADMIN_PASSWORD_HASH;
+    if (!hashVal.startsWith('$2a$') && !hashVal.startsWith('$2b$')) {
+      const salt = bcrypt.genSaltSync(10);
+      const hash = bcrypt.hashSync(hashVal, salt);
+      envVars.LOCAL_ADMIN_PASSWORD_HASH = hash;
+      envUpdated = true;
+      console.log('[BOOTSTRAP] Plaintext local admin password detected and securely hashed with bcrypt.');
+    }
   }
 
-  // 3. Ensure other fields exist
+  // 3. Ensure other default fields exist in the env vars map
   const defaults = {
     VITE_API_URL: 'http://localhost:3001',
+    SESSION_SECRET: crypto.randomBytes(32).toString('hex'),
+    REFRESH_SECRET: crypto.randomBytes(32).toString('hex'),
     AZURE_CLIENT_ID: '',
     AZURE_TENANT_ID: '',
     AZURE_CLIENT_SECRET: '',
-    AZURE_SUBSCRIPTION_ID: ''
+    AZURE_SUBSCRIPTION_ID: '',
+    GOOGLE_CLIENT_ID: '',
+    GOOGLE_CLIENT_SECRET: ''
   };
 
   for (const [key, defVal] of Object.entries(defaults)) {
@@ -69,28 +83,44 @@ function bootstrapEnv() {
     }
   }
 
-  // Write env file if updated or missing
+  // Write env file if updated or missing, preserving all variables
   if (envUpdated || !exists) {
-    const newContentLines = [];
-    newContentLines.push('# Single-Administrator Authentication');
-    newContentLines.push(`LOCAL_ADMIN_EMAIL=${envVars.LOCAL_ADMIN_EMAIL}`);
-    newContentLines.push(`LOCAL_ADMIN_PASSWORD_HASH=${envVars.LOCAL_ADMIN_PASSWORD_HASH}`);
-    newContentLines.push('');
-    newContentLines.push('# JWT Signatures Secret');
-    newContentLines.push(`JWT_SECRET=${envVars.JWT_SECRET}`);
-    newContentLines.push('');
-    newContentLines.push('# Frontend API Configuration');
-    newContentLines.push(`VITE_API_URL=${envVars.VITE_API_URL}`);
-    newContentLines.push('');
-    newContentLines.push('# Production Azure SDK Credentials');
-    newContentLines.push(`AZURE_CLIENT_ID=${envVars.AZURE_CLIENT_ID}`);
-    newContentLines.push(`AZURE_TENANT_ID=${envVars.AZURE_TENANT_ID}`);
-    newContentLines.push(`AZURE_CLIENT_SECRET=${envVars.AZURE_CLIENT_SECRET}`);
-    newContentLines.push(`AZURE_SUBSCRIPTION_ID=${envVars.AZURE_SUBSCRIPTION_ID}`);
-    newContentLines.push('');
+    const newContentLines = [
+      '# Single-Administrator Authentication',
+      `LOCAL_ADMIN_EMAIL=${envVars.LOCAL_ADMIN_EMAIL}`,
+      `LOCAL_ADMIN_PASSWORD_HASH=${envVars.LOCAL_ADMIN_PASSWORD_HASH}`,
+      '',
+      '# Secrets configuration',
+      `JWT_SECRET=${envVars.JWT_SECRET}`,
+      `SESSION_SECRET=${envVars.SESSION_SECRET}`,
+      `REFRESH_SECRET=${envVars.REFRESH_SECRET}`,
+      '',
+      '# Production Azure SDK Credentials',
+      `AZURE_CLIENT_ID=${envVars.AZURE_CLIENT_ID}`,
+      `AZURE_TENANT_ID=${envVars.AZURE_TENANT_ID}`,
+      `AZURE_CLIENT_SECRET=${envVars.AZURE_CLIENT_SECRET}`,
+      `AZURE_SUBSCRIPTION_ID=${envVars.AZURE_SUBSCRIPTION_ID}`,
+      '',
+      '# Google OAuth Credentials',
+      `GOOGLE_CLIENT_ID=${envVars.GOOGLE_CLIENT_ID}`,
+      `GOOGLE_CLIENT_SECRET=${envVars.GOOGLE_CLIENT_SECRET}`
+    ];
+
+    // Append any extra variables that were loaded but not in our default structure
+    const keysInTemplate = new Set([
+      'LOCAL_ADMIN_EMAIL', 'LOCAL_ADMIN_PASSWORD_HASH', 'JWT_SECRET', 'SESSION_SECRET', 'REFRESH_SECRET',
+      'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_SUBSCRIPTION_ID',
+      'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'
+    ]);
+
+    for (const [key, val] of Object.entries(envVars)) {
+      if (!keysInTemplate.has(key)) {
+        newContentLines.push(`${key}=${val}`);
+      }
+    }
 
     fs.writeFileSync(envPath, newContentLines.join('\n'), 'utf8');
-    console.log('[BOOTSTRAP] .env file created/updated successfully.');
+    console.log('[BOOTSTRAP] .env file successfully created/updated.');
   }
 
   // Print generated admin password ONCE if it was created
@@ -104,26 +134,6 @@ function bootstrapEnv() {
 
   // Load environment variables into process.env using dotenv path
   require('dotenv').config({ path: envPath });
-
-  // Startup validation for Microsoft Entra ID
-  const missingVars = [];
-  if (!process.env.AZURE_CLIENT_ID || process.env.AZURE_CLIENT_ID.trim() === '' || process.env.AZURE_CLIENT_ID.includes('YOUR_')) {
-    missingVars.push('AZURE_CLIENT_ID');
-  }
-  if (!process.env.AZURE_TENANT_ID || process.env.AZURE_TENANT_ID.trim() === '' || process.env.AZURE_TENANT_ID.includes('YOUR_')) {
-    missingVars.push('AZURE_TENANT_ID');
-  }
-  
-  if (missingVars.length > 0) {
-    console.warn('\n================================================================');
-    console.warn('⚠️  CRITICAL VALIDATION ALERT: Microsoft Entra ID config missing/incomplete.');
-    console.warn(`Missing variables: ${missingVars.join(', ')}`);
-    console.warn('Actionable Instructions:');
-    console.warn('1. Register an application in Microsoft Entra Admin Center.');
-    console.warn('2. Configure SPA Platform with redirect URI: http://localhost:5173');
-    console.warn('3. Copy Client ID and Tenant ID into your .env file.');
-    console.warn('================================================================\n');
-  }
 }
 
 module.exports = {

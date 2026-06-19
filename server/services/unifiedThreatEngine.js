@@ -4,9 +4,8 @@
 // ============================================================
 
 const { getDatabase } = require('../db/database');
-const { getDefenderAlerts, getDefenderRecommendations } = require('./defenderService');
-// AWS and GCP providers will be invoked via the ProviderFactory or directly
-const { ProviderFactory } = require('../providers/ProviderFactory');
+const { getDefenderAlerts } = require('./defenderService');
+const ProviderFactory = require('../providers/ProviderFactory');
 
 /**
  * Helper to map common titles to MITRE ATT&CK Tactics
@@ -29,16 +28,17 @@ function normalizeAzureAlert(alert, accountId) {
   return {
     id: alert.id,
     provider: 'azure',
-    account: accountId,
+    source: 'Defender',
+    eventName: title,
     severity: normalizeSeverity(alert.severity),
-    category: 'Security Alert',
-    source: 'Microsoft Defender',
-    title: title,
-    description: alert.description || '',
+    status: 'Open',
+    resource: alert.resourceId || 'Unknown',
+    service: alert.alertType || 'Azure Resource',
+    region: alert.location || 'global',
     timestamp: alert.detectedAt || new Date().toISOString(),
-    resource: alert.resourceId,
-    remediation: alert.remediationSteps ? alert.remediationSteps.join(' ') : 'Investigate alert immediately.',
-    mitreTactic: mapMitreTactic(title),
+    user: 'System',
+    ip: 'N/A',
+    remediation: alert.remediationSteps ? [{ action: alert.remediationSteps.join(' '), status: 'PENDING', timestamp: new Date().toISOString() }] : [],
     raw: alert
   };
 }
@@ -51,16 +51,17 @@ function normalizeAwsFinding(finding, accountId) {
   return {
     id: finding.id,
     provider: 'aws',
-    account: accountId,
+    source: finding.source || 'Security Hub',
+    eventName: title,
     severity: normalizeSeverity(finding.severity),
-    category: 'Security Finding',
-    source: finding.source || 'AWS Security Hub',
-    title: title,
-    description: finding.description || '',
-    timestamp: finding.createdAt || new Date().toISOString(),
+    status: finding.status === 'ARCHIVED' ? 'Resolved' : 'Open',
     resource: finding.resourceId || 'Unknown',
-    remediation: finding.recommendation || 'Review finding in AWS Console.',
-    mitreTactic: mapMitreTactic(title),
+    service: finding.resourceType || 'AWS Resource',
+    region: finding.region || 'us-east-1',
+    timestamp: finding.createdAt || new Date().toISOString(),
+    user: finding.user || 'System',
+    ip: finding.ip || 'N/A',
+    remediation: finding.recommendation ? [{ action: finding.recommendation, status: 'PENDING', timestamp: new Date().toISOString() }] : [],
     raw: finding
   };
 }
@@ -69,20 +70,21 @@ function normalizeAwsFinding(finding, accountId) {
  * Normalizes a GCP Security Command Center Finding.
  */
 function normalizeGcpFinding(finding, accountId) {
-  const title = finding.category || 'GCP Security Finding';
+  const title = finding.title || finding.category || 'GCP Security Finding';
   return {
-    id: finding.name || `gcp-${Date.now()}`,
+    id: finding.id || finding.name || `gcp-${Date.now()}`,
     provider: 'gcp',
-    account: accountId,
+    source: 'Security Hub',
+    eventName: title,
     severity: normalizeSeverity(finding.severity),
-    category: finding.category || 'Security Finding',
-    source: 'GCP Security Command Center',
-    title: title,
-    description: finding.description || '',
-    timestamp: finding.eventTime || finding.createTime || new Date().toISOString(),
+    status: finding.state === 'ACTIVE' ? 'Open' : 'Resolved',
     resource: finding.resourceName || 'Unknown',
-    remediation: finding.nextSteps || 'Review finding in GCP Console.',
-    mitreTactic: mapMitreTactic(title),
+    service: finding.resourceType || 'GCP Resource',
+    region: finding.location || 'global',
+    timestamp: finding.eventTime || finding.createTime || new Date().toISOString(),
+    user: 'System',
+    ip: 'N/A',
+    remediation: finding.nextSteps ? [{ action: finding.nextSteps, status: 'PENDING', timestamp: new Date().toISOString() }] : [],
     raw: finding
   };
 }
@@ -99,28 +101,44 @@ function normalizeSeverity(sev) {
 
 /**
  * Fetches and normalizes all active threats for a tenant across all connected clouds.
+ * Restricts query strictly to the current user's accounts to prevent data leakage.
  */
-async function getUnifiedThreats(tenantId) {
+async function getUnifiedThreats(tenantId, userId) {
   const db = await getDatabase();
-  const accounts = await db.all('SELECT * FROM cloud_accounts WHERE tenant_id = ?', [tenantId]);
+  const cloudAccounts = await db.all('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ?', [tenantId, userId]);
+  const azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [tenantId, userId]);
   
   let allThreats = [];
 
-  for (const acc of accounts) {
+  // 1. Process Azure subscriptions direct threats
+  for (const sub of azureSubs) {
+    try {
+      const alerts = await getDefenderAlerts(tenantId, sub.id);
+      allThreats = allThreats.concat(alerts.map(a => normalizeAzureAlert(a, sub.subscription_id || sub.id)));
+    } catch (err) {
+      console.warn(`[THREAT_ENGINE] Failed to fetch Defender alerts for Azure sub ${sub.name || sub.id}:`, err.message);
+    }
+  }
+
+  // 2. Process AWS/GCP (and Azure if registered in cloud_accounts) cloud accounts
+  for (const acc of cloudAccounts) {
     try {
       if (acc.provider === 'azure') {
-        const alerts = await getDefenderAlerts(tenantId, acc.id);
-        allThreats = allThreats.concat(alerts.map(a => normalizeAzureAlert(a, acc.account_id || acc.id)));
+        const alreadyProcessed = azureSubs.some(s => s.id === acc.id || s.subscription_id === acc.subscription_id);
+        if (!alreadyProcessed) {
+          const alerts = await getDefenderAlerts(tenantId, acc.id);
+          allThreats = allThreats.concat(alerts.map(a => normalizeAzureAlert(a, acc.subscription_id || acc.account_id || acc.id)));
+        }
       } 
       else if (acc.provider === 'aws') {
-        const provider = ProviderFactory.getProvider('aws', acc);
+        const provider = ProviderFactory.getProvider(acc);
         const awsSec = await provider.getSecurity();
         if (awsSec && awsSec.findings) {
           allThreats = allThreats.concat(awsSec.findings.map(f => normalizeAwsFinding(f, acc.account_id || acc.id)));
         }
       }
       else if (acc.provider === 'gcp') {
-        const provider = ProviderFactory.getProvider('gcp', acc);
+        const provider = ProviderFactory.getProvider(acc);
         if (provider.getSecurity) {
           const gcpSec = await provider.getSecurity();
           if (gcpSec && gcpSec.findings) {
@@ -129,7 +147,7 @@ async function getUnifiedThreats(tenantId) {
         }
       }
     } catch (err) {
-      console.warn(`[THREAT_ENGINE] Failed to fetch threats for account ${acc.id} (${acc.provider}):`, err.message);
+      console.warn(`[THREAT_ENGINE] Failed to fetch threats for account ${acc.account_name} (${acc.provider}):`, err.message);
     }
   }
 

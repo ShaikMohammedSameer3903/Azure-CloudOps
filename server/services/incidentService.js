@@ -18,14 +18,9 @@ async function getIncidents(tenantId, userId, userRole, statusFilter, providerFi
     LEFT JOIN azure_subscriptions s ON i.subscription_id = s.id
     LEFT JOIN cloud_accounts c ON i.subscription_id = c.id
     LEFT JOIN resources r ON i.resource_id = r.id
-    WHERE (s.tenant_id = ? OR c.tenant_id = ?)
+    WHERE (i.user_id = ? OR s.user_id = ? OR c.user_id = ?)
   `;
-  const params = [tenantId, tenantId];
-
-  if (userRole !== 'Admin' && userRole !== 'SuperAdmin') {
-    query += ` AND (s.user_id = ? OR c.user_id = ?)`;
-    params.push(userId, userId);
-  }
+  const params = [userId, userId, userId];
 
   if (statusFilter) {
     query += ` AND i.status = ?`;
@@ -42,12 +37,8 @@ async function getIncidents(tenantId, userId, userRole, statusFilter, providerFi
   // Dynamically inject REAL AWS Security findings if applicable
   if (!providerFilter || providerFilter.toLowerCase() === 'aws') {
     try {
-      let accQuery = "SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = 'aws' AND status = 'Active'";
-      let accParams = [tenantId];
-      if (userRole !== 'Admin' && userRole !== 'SuperAdmin') {
-        accQuery += " AND user_id = ?";
-        accParams.push(userId);
-      }
+      let accQuery = "SELECT * FROM cloud_accounts WHERE provider = 'aws' AND status = 'Active' AND user_id = ?";
+      let accParams = [userId];
       const awsAccounts = await db.all(accQuery, accParams);
       if (awsAccounts.length > 0) {
         const ProviderFactory = require('../providers/ProviderFactory');
@@ -93,10 +84,7 @@ async function getIncidents(tenantId, userId, userRole, statusFilter, providerFi
   return results;
 }
 
-/**
- * Trigger/Create a new incident (often called by automated discovery or alerts monitoring)
- */
-async function createIncident(tenantId, subscriptionId, resourceId, title, severity, category, description) {
+async function createIncident(userId, tenantId, subscriptionId, resourceId, title, severity, category, description) {
   const db = await getDatabase();
   const id = `inc-${Math.random().toString(36).substring(2, 11)}`;
 
@@ -107,7 +95,7 @@ async function createIncident(tenantId, subscriptionId, resourceId, title, sever
 
   // Push notification automatically
   const notifMsg = `[${severity}] New incident triggered on resource: ${title}`;
-  await createNotification(tenantId, `Incident Triggered`, notifMsg, 'incident');
+  await createNotification(userId, tenantId, `Incident Triggered`, notifMsg, 'incident');
 
   return { id, title, severity, status: 'ACTIVE', category, description };
 }
@@ -121,9 +109,10 @@ async function acknowledgeIncident(tenantId, incidentId, userEmail, userId) {
   // Verify incident belongs to tenant
   const incident = await db.get(`
     SELECT i.* FROM incidents i
-    JOIN azure_subscriptions s ON i.subscription_id = s.id
-    WHERE s.tenant_id = ? AND i.id = ?
-  `, [tenantId, incidentId]);
+    LEFT JOIN azure_subscriptions s ON i.subscription_id = s.id
+    LEFT JOIN cloud_accounts c ON i.subscription_id = c.id
+    WHERE (i.user_id = ? OR s.user_id = ? OR c.user_id = ?) AND i.id = ?
+  `, [userId, userId, userId, incidentId]);
 
   if (!incident) {
     throw new Error('Incident not found or access denied.');
@@ -152,9 +141,10 @@ async function resolveIncident(tenantId, incidentId, userEmail, userId) {
   // Verify incident belongs to tenant
   const incident = await db.get(`
     SELECT i.* FROM incidents i
-    JOIN azure_subscriptions s ON i.subscription_id = s.id
-    WHERE s.tenant_id = ? AND i.id = ?
-  `, [tenantId, incidentId]);
+    LEFT JOIN azure_subscriptions s ON i.subscription_id = s.id
+    LEFT JOIN cloud_accounts c ON i.subscription_id = c.id
+    WHERE (i.user_id = ? OR s.user_id = ? OR c.user_id = ?) AND i.id = ?
+  `, [userId, userId, userId, incidentId]);
 
   if (!incident) {
     throw new Error('Incident not found or access denied.');

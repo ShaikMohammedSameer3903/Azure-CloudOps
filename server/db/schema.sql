@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS resources (
     id TEXT PRIMARY KEY, -- Fully qualified Azure Resource ID
     subscription_id TEXT NOT NULL,
     tenant_id TEXT,
+    user_id TEXT,
     provider TEXT DEFAULT 'Azure',
     resource_group TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -147,6 +148,7 @@ CREATE TABLE IF NOT EXISTS resources (
 CREATE TABLE IF NOT EXISTS incidents (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
+    user_id TEXT,
     provider TEXT NOT NULL DEFAULT 'Azure',
     subscription_id TEXT NOT NULL,
     resource_id TEXT,
@@ -229,6 +231,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS cost_budgets (
     id TEXT PRIMARY KEY,
     subscription_id TEXT NOT NULL,
+    user_id TEXT,
     amount REAL NOT NULL,
     time_grain TEXT CHECK(time_grain IN ('MONTHLY', 'QUARTERLY', 'YEARLY')) NOT NULL DEFAULT 'MONTHLY',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -243,6 +246,7 @@ CREATE TABLE IF NOT EXISTS operations (
     time_remaining TEXT,
     status TEXT CHECK(status IN ('Pending', 'Running', 'Succeeded', 'Failed')) NOT NULL DEFAULT 'Pending',
     user_email TEXT NOT NULL,
+    user_id TEXT,
     tenant_id TEXT,
     cloud_account_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -273,10 +277,35 @@ CREATE TABLE IF NOT EXISTS privileged_actions (
     resolved_at DATETIME,
     FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
 );
+
+-- 14. Tenant Billing Table (SaaS Commercialization)
+CREATE TABLE IF NOT EXISTS tenant_billing (
+    tenant_id TEXT PRIMARY KEY,
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    plan_tier TEXT CHECK(plan_tier IN ('Starter', 'Professional', 'Enterprise')) DEFAULT 'Starter',
+    status TEXT CHECK(status IN ('Active', 'PastDue', 'Canceled', 'Trialing')) DEFAULT 'Trialing',
+    trial_ends_at DATETIME,
+    current_period_end DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+);
+
+-- 15. Feature Flags Table
+CREATE TABLE IF NOT EXISTS feature_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL,
+    feature_name TEXT NOT NULL,
+    is_enabled INTEGER DEFAULT 0,
+    FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    UNIQUE(tenant_id, feature_name)
+);
+
 -- Performance Indexes
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_cloud_accounts_tenant ON cloud_accounts(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_resources_sub ON resources(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_incidents_sub ON incidents(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant ON audit_logs(tenant_id);
+
 

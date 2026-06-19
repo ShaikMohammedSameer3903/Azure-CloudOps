@@ -9,6 +9,7 @@ const router = express.Router();
 const { getDatabase } = require('../db/database');
 const { authorizeRoles } = require('../middleware/rbac');
 const { discoverAllResources } = require('../services/discoveryEngine');
+const { enqueueJob } = require('../services/jobQueue');
 const { clearClientCache } = require('../services/azureCredentialManager');
 
 // ── Role helper ─────────────────────────────────────────────
@@ -22,24 +23,13 @@ function isAdminRole(role) {
 router.get('/', async (req, res) => {
   try {
     const db = await getDatabase();
-    const isAdmin = isAdminRole(req.userRole);
-
     let subs;
-    if (isAdmin) {
-      // Admins see all subscriptions registered in this org tenant
-      console.log(`[SECURITY] Admin subscription list: user=${req.userEmail} tenant=***`);
-      subs = await db.all(
-        'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE tenant_id = ?',
-        [req.tenantId]
-      );
-    } else {
-      // Regular users: ONLY their own registered subscriptions
-      console.log(`[SECURITY] User subscription list: user=${req.userEmail} (${req.userId}) tenant=***`);
-      subs = await db.all(
-        'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE user_id = ?',
-        [req.userId]
-      );
-    }
+    // Strict Multi-Tenant Data Isolation: All subscriptions strictly scoped by user_id
+    console.log(`[SECURITY] User subscription list: user=${req.userEmail} (${req.userId}) tenant=***`);
+    subs = await db.all(
+      'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE user_id = ?',
+      [req.userId]
+    );
 
     // If user has an Azure Management token, cross-reference with Azure ARM for real-time state
     const userAzureToken = req.headers['x-azure-token'];
@@ -52,13 +42,12 @@ router.get('/', async (req, res) => {
           const armData = await armResponse.json();
           const armSubs = armData.value || [];
 
-          if (!isAdmin) {
-            // For non-admins: auto-register any Azure subscriptions not yet in DB
-            for (const armSub of armSubs) {
-              const exists = await db.get(
-                'SELECT id FROM azure_subscriptions WHERE subscription_id = ? AND user_id = ?',
-                [armSub.subscriptionId, req.userId]
-              );
+          // Auto-register any Azure subscriptions not yet in DB
+          for (const armSub of armSubs) {
+            const exists = await db.get(
+              'SELECT id FROM azure_subscriptions WHERE subscription_id = ? AND user_id = ?',
+              [armSub.subscriptionId, req.userId]
+            );
               if (!exists) {
                 try {
                   const newId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -75,11 +64,12 @@ router.get('/', async (req, res) => {
                     ]
                   );
                   await db.run(
-                    `INSERT INTO cloud_accounts (id, tenant_id, provider, account_name, subscription_id, region, status, created_at)
-                     VALUES (?, ?, 'azure', ?, ?, 'global', ?, CURRENT_TIMESTAMP)`,
+                    `INSERT INTO cloud_accounts (id, tenant_id, user_id, provider, account_name, subscription_id, region, status, created_at)
+                     VALUES (?, ?, ?, 'azure', ?, ?, 'global', ?, CURRENT_TIMESTAMP)`,
                     [
                       newId,
                       req.tenantId,
+                      req.userId,
                       armSub.displayName,
                       armSub.subscriptionId,
                       armSub.state || 'Active'
@@ -96,7 +86,6 @@ router.get('/', async (req, res) => {
               'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE user_id = ?',
               [req.userId]
             );
-          }
 
           // Attach ARM state to existing subs
           subs = subs.map(sub => {
@@ -150,23 +139,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Also check if an admin already registered this sub at the tenant level
-    if (isAdminRole(req.userRole)) {
-      const tenantDuplicate = await db.get(
-        'SELECT * FROM azure_subscriptions WHERE subscription_id = ? AND tenant_id = ?',
-        [subscriptionId, req.tenantId]
-      );
-      if (tenantDuplicate) {
-        return res.json({
-          id: tenantDuplicate.id,
-          subscription_id: tenantDuplicate.subscription_id,
-          name: tenantDuplicate.name,
-          auth_type: tenantDuplicate.auth_type,
-          status: tenantDuplicate.status,
-          message: 'Subscription already registered by another admin in this tenant.'
-        });
-      }
-    }
+    // Removed tenant-level admin check to enforce strict 1:1 user ownership
 
     const id = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const status = 'Enabled';
@@ -178,9 +151,9 @@ router.post('/', async (req, res) => {
     );
 
     await db.run(
-      `INSERT INTO cloud_accounts (id, tenant_id, provider, account_name, subscription_id, region, status)
-       VALUES (?, ?, 'azure', ?, ?, 'global', 'Active')`,
-      [id, req.tenantId, name, subscriptionId]
+      `INSERT INTO cloud_accounts (id, tenant_id, user_id, provider, account_name, subscription_id, region, status)
+       VALUES (?, ?, ?, 'azure', ?, ?, 'global', 'Active')`,
+      [id, req.tenantId, req.userId, name, subscriptionId]
     );
 
     console.log(`[SECURITY] Subscription registered: ${name} (***) by user ${req.userEmail} (${req.userId})`);
@@ -204,34 +177,27 @@ router.post('/:id/sync', async (req, res) => {
 
   try {
     const db = await getDatabase();
-    const isAdmin = isAdminRole(req.userRole);
-
-    // Ownership check: users can only sync their own subs; admins can sync any tenant sub
-    let sub;
-    if (isAdmin) {
-      sub = await db.get(
-        'SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND id = ?',
-        [req.tenantId, id]
-      );
-    } else {
-      sub = await db.get(
-        'SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?',
-        [req.userId, id]
-      );
-    }
+    // Strict Multi-Tenant Data Isolation
+    const sub = await db.get(
+      'SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?',
+      [req.userId, id]
+    );
 
     if (!sub) {
       return res.status(404).json({ error: 'Subscription not found or access denied.' });
     }
 
-    console.log(`[SECURITY] Sync triggered: sub=${sub.id} by user=${req.userEmail} (${req.userRole})`);
+    console.log(`[SECURITY] Sync queued: sub=${sub.id} by user=${req.userEmail} (${req.userRole})`);
 
-    const result = await discoverAllResources(sub.tenant_id || req.tenantId, sub.id, userAccessToken);
+    const opId = await enqueueJob(
+      sub.tenant_id || req.tenantId,
+      req.userId,
+      req.userEmail,
+      sub.id,
+      `Sync Azure Subscription: ${sub.name || sub.subscription_id}`
+    );
 
-    const resourceCount = await db.get('SELECT COUNT(*) as count FROM resources WHERE subscription_id = ?', [sub.id]);
-    console.log(`[SECURITY] Sync complete: sub=*** resources=${resourceCount?.count || 0}`);
-
-    res.json({ success: true, subscriptionId: sub.subscription_id, resourceCount: resourceCount?.count || 0, ...result });
+    res.json({ success: true, message: 'Discovery job queued in background', operationId: opId, subscriptionId: sub.subscription_id });
   } catch (error) {
     console.error('[ROUTES] POST /subscriptions/:id/sync failed:', error);
     res.status(500).json({ error: error.message || 'Failed to sync subscription.' });
@@ -245,14 +211,8 @@ router.put('/:id', authorizeRoles('OWNER', 'ADMIN', 'SuperAdmin', 'Admin'), asyn
 
   try {
     const db = await getDatabase();
-    const isAdmin = isAdminRole(req.userRole);
-
-    let sub;
-    if (isAdmin) {
-      sub = await db.get('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND id = ?', [req.tenantId, id]);
-    } else {
-      sub = await db.get('SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?', [req.userId, id]);
-    }
+    // Strict Multi-Tenant Data Isolation
+    const sub = await db.get('SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?', [req.userId, id]);
 
     if (!sub) {
       return res.status(404).json({ error: 'Subscription not found or access denied.' });
@@ -285,14 +245,8 @@ router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    const isAdmin = isAdminRole(req.userRole);
-
-    let sub;
-    if (isAdmin) {
-      sub = await db.get('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND id = ?', [req.tenantId, id]);
-    } else {
-      sub = await db.get('SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?', [req.userId, id]);
-    }
+    // Strict Multi-Tenant Data Isolation
+    const sub = await db.get('SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?', [req.userId, id]);
 
     if (!sub) {
       return res.status(404).json({ error: 'Subscription not found or access denied.' });

@@ -203,8 +203,36 @@ async function getDatabase() {
           WHERE cloud_account_id IS NULL AND subscription_id IS NOT NULL
         `);
       }
+      if (!colNames.includes('user_id')) {
+        console.log('[DB] Migrating: Adding user_id column to resources');
+        await db.run('ALTER TABLE resources ADD COLUMN user_id TEXT');
+      }
     } catch (err) {
       console.error('[DB] Migration of resources columns failed:', err);
+    }
+
+    // Handle migration for user_id in incidents
+    try {
+      const incColumns = await db.all('PRAGMA table_info(incidents)');
+      const incColNames = incColumns.map(c => c.name);
+      if (!incColNames.includes('user_id')) {
+        console.log('[DB] Migrating: Adding user_id column to incidents');
+        await db.run('ALTER TABLE incidents ADD COLUMN user_id TEXT');
+      }
+    } catch (err) {
+      console.error('[DB] Migration of incidents table failed:', err);
+    }
+
+    // Handle migration for user_id in cost_budgets
+    try {
+      const cbColumns = await db.all('PRAGMA table_info(cost_budgets)');
+      const cbColNames = cbColumns.map(c => c.name);
+      if (!cbColNames.includes('user_id')) {
+        console.log('[DB] Migrating: Adding user_id column to cost_budgets');
+        await db.run('ALTER TABLE cost_budgets ADD COLUMN user_id TEXT');
+      }
+    } catch (err) {
+      console.error('[DB] Migration of cost_budgets table failed:', err);
     }
 
     // Handle migration for active_resource_group if existing database doesn't have it
@@ -316,6 +344,10 @@ async function getDatabase() {
       if (!opColNames.includes('cloud_account_id')) {
         console.log('[DB] Migrating: Adding cloud_account_id column to operations');
         await db.run("ALTER TABLE operations ADD COLUMN cloud_account_id TEXT");
+      }
+      if (!opColNames.includes('user_id')) {
+        console.log('[DB] Migrating: Adding user_id column to operations');
+        await db.run("ALTER TABLE operations ADD COLUMN user_id TEXT");
       }
     } catch (err) {
       console.error('[DB] Migration of operations table failed:', err);
@@ -450,6 +482,7 @@ async function seedDefaultAdmin(database) {
     { id: 'admin-shaiksameer-gmail', email: 'shaiksameer3909sam@gmail.com', role: 'SuperAdmin', display_name: 'Sameer Shaik', provider: 'Google' }
   ];
 
+  const bcrypt = require('bcryptjs');
   const passwordHash = process.env.LOCAL_ADMIN_PASSWORD_HASH || '$2a$10$wE81YmQx921rQ2KzJzW/k.L16aK6qC0N114/Xw/2GvX7G7n4m.7tG'; // Default for admin123 if env missing
 
   for (const item of defaultAdmins) {
@@ -471,16 +504,51 @@ async function seedDefaultAdmin(database) {
     }
   }
 
+  // Seed environment-configured local administrator
+  if (process.env.LOCAL_ADMIN_EMAIL) {
+    const localEmail = process.env.LOCAL_ADMIN_EMAIL.toLowerCase();
+    const adminCheck = await database.get('SELECT * FROM users WHERE email = ?', [localEmail]);
+    let finalHash = process.env.LOCAL_ADMIN_PASSWORD_HASH || passwordHash;
+    if (finalHash && !finalHash.startsWith('$2a$') && !finalHash.startsWith('$2b$')) {
+      const salt = bcrypt.genSaltSync(10);
+      finalHash = bcrypt.hashSync(finalHash, salt);
+    }
+    if (!adminCheck) {
+      console.log(`[DB] Seeding environment local administrator account: ${localEmail}`);
+      await database.run(`
+        INSERT INTO users (id, email, display_name, role, tenant_id, status, provider, password_hash)
+        VALUES ('local-admin-env', ?, 'Local Admin', 'SuperAdmin', 'demo-org-001', 'Approved', 'Local', ?)
+      `, [localEmail, finalHash]);
+    } else {
+      console.log(`[DB] Updating environment local administrator account: ${localEmail}`);
+      await database.run(`
+        UPDATE users 
+        SET role = 'SuperAdmin', 
+            password_hash = ?
+        WHERE email = ?
+      `, [finalHash, localEmail]);
+    }
+  }
+
   // Database Cleanup
   console.log('[DB] Running security database cleanup: Demoting unauthorized SuperAdmins and removing demo/friend accounts...');
   
-  // Demote all existing SuperAdmin users except the three authorized accounts above
+  // Demote all existing SuperAdmin users except the three authorized accounts above and environment local admin
+  const excludedEmails = [
+    '2300031607@kluniversity.in',
+    '2300030621@kluniversity.in',
+    'shaiksameer3909sam@gmail.com'
+  ];
+  if (process.env.LOCAL_ADMIN_EMAIL) {
+    excludedEmails.push(process.env.LOCAL_ADMIN_EMAIL.toLowerCase());
+  }
+  const placeHolders = excludedEmails.map(() => '?').join(',');
   await database.run(`
     UPDATE users 
     SET role = 'Viewer' 
     WHERE role = 'SuperAdmin' 
-      AND email NOT IN ('2300031607@kluniversity.in', '2300030621@kluniversity.in', 'shaiksameer3909sam@gmail.com')
-  `);
+      AND email NOT IN (${placeHolders})
+  `, excludedEmails);
 
   // Remove demo accounts
   await database.run(`

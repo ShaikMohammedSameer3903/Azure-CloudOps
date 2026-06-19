@@ -13,6 +13,7 @@ const { getServiceHealthAlerts, getResourceHealth, getPlannedMaintenance } = req
 const { calculateRiskScore } = require('../services/riskEngine');
 const { getCloudHealthScore } = require('../services/cloudHealthService');
 const { getCache, setCache } = require('../services/cacheService');
+const ProviderFactory = require('../providers/ProviderFactory');
 
 const { verifySubscriptionAccess, logSecurityEvent } = require('../middleware/subscriptionSecurity');
 
@@ -174,9 +175,39 @@ router.get('/metrics', async (req, res) => {
   }
 });
 
-// ── 2. GET /api/monitoring/cost ──────────────────────────────
+// ── 2. GET /api/monitoring/cost ────────────────────────────────────────
 router.get('/cost', async (req, res) => {
-  const { subscriptionId } = req.query;
+  const { subscriptionId, provider } = req.query;
+
+  // AWS Cost — use real AwsCostService
+  if (provider === 'aws') {
+    try {
+      const db = await getDatabase();
+      const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND (id = ? OR account_id = ?) AND user_id = ?',
+        [req.tenantId, 'aws', subscriptionId, subscriptionId, req.userId]);
+      if (!account) return res.status(404).json({ error: 'AWS Account not found or access denied' });
+
+      const ProviderFactory = require('../providers/ProviderFactory');
+      const providerInstance = ProviderFactory.getProvider(account);
+      const costData = await providerInstance.getCost();
+
+      if (costData.costExplorerUnavailable) {
+        return res.status(403).json({
+          code: 'MissingBillingPermission',
+          provider: 'aws',
+          message: costData.errorMsg || 'The authenticated account does not have permission to access billing information.',
+          costUnavailable: true
+        });
+      }
+
+      return res.json(costData);
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const classified = classifyCloudError(err, 'aws');
+      return res.status(classified.status).json({ ...classified.body, costUnavailable: true });
+    }
+  }
+
   const userAccessToken = req.azureAccessToken || req.headers['x-azure-token'] || null;
   if (!subscriptionId) return res.status(400).json({ error: 'subscriptionId is required.' });
   try {
@@ -186,8 +217,10 @@ router.get('/cost', async (req, res) => {
     const data = await getCostConsumption(req.tenantId, sub.id, userAccessToken);
     res.json(data);
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/cost failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const classified = classifyCloudError(err, 'azure');
+    console.error(`[ROUTES] GET /monitoring/cost failed (${classified.status}):`, err.message);
+    res.status(classified.status).json({ ...classified.body, costUnavailable: true });
   }
 });
 
@@ -215,8 +248,9 @@ router.get('/backup', async (req, res) => {
     const data = await getBackupHealth(req.tenantId, sub.id, userAccessToken);
     res.json(data);
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/backup failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const { status, payload } = classifyCloudError(err, 'azure');
+    res.status(status).json(payload);
   }
 });
 
@@ -229,10 +263,10 @@ router.get('/alerts', async (req, res) => {
       const db = await getDatabase();
       let awsAccounts = [];
       if (subscriptionId) {
-        const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND (id = ? OR subscription_id = ? OR account_id = ?)', [req.tenantId, subscriptionId, subscriptionId, subscriptionId]);
+        const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND (id = ? OR subscription_id = ? OR account_id = ?) AND user_id = ?', [req.tenantId, subscriptionId, subscriptionId, subscriptionId, req.userId]);
         if (account) awsAccounts.push(account);
       } else {
-        awsAccounts = await db.all("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = 'aws' AND status = 'Active'", [req.tenantId]);
+        awsAccounts = await db.all("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active'", [req.tenantId, req.userId]);
       }
       
       const allAlarms = [];
@@ -254,8 +288,9 @@ router.get('/alerts', async (req, res) => {
       }
       return res.json(allAlarms);
     } catch (err) {
-      console.error('[ROUTES] GET /monitoring/alerts AWS failed:', err.message);
-      return res.status(500).json({ error: err.message });
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
     }
   }
 
@@ -268,8 +303,9 @@ router.get('/alerts', async (req, res) => {
     const data = await getActiveAlerts(req.tenantId, sub.id, userAccessToken);
     res.json(data);
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/alerts failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const { status, payload } = classifyCloudError(err, 'azure');
+    res.status(status).json(payload);
   }
 });
 
@@ -291,7 +327,11 @@ router.get('/defender', async (req, res) => {
         compliance: [],
         errors: {}
       });
-    } catch (e) { return res.status(500).json({ error: e.message }); }
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
+    }
   }
 
   const userAccessToken = req.azureAccessToken || req.headers['x-azure-token'] || null;
@@ -320,8 +360,9 @@ router.get('/defender', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/defender failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const { status, payload } = classifyCloudError(err, 'azure');
+    res.status(status).json(payload);
   }
 });
 
@@ -337,7 +378,11 @@ router.get('/advisor', async (req, res) => {
       const providerInstance = ProviderFactory.getProvider(account);
       const adv = await providerInstance.getAdvisor();
       return res.json({ recommendations: adv.recommendations || [], score: { score: 100 } });
-    } catch (e) { return res.status(500).json({ error: e.message }); }
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
+    }
   }
 
   const { category } = req.query;
@@ -368,8 +413,9 @@ router.get('/advisor', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/advisor failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const { status, payload } = classifyCloudError(err, 'azure');
+    res.status(status).json(payload);
   }
 });
 
@@ -385,7 +431,11 @@ router.get('/health', async (req, res) => {
       const providerInstance = ProviderFactory.getProvider(account);
       const health = await providerInstance.getHealth();
       return res.json({ serviceHealth: health.events, resourceHealth: [], plannedMaintenance: [] });
-    } catch (e) { return res.status(500).json({ error: e.message }); }
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
+    }
   }
 
   const { resourceId } = req.query;
@@ -414,18 +464,64 @@ router.get('/health', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/health failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const { status, payload } = classifyCloudError(err, 'azure');
+    res.status(status).json(payload);
   }
 });
 
-// ── 8. GET /api/monitoring/risk ─────────────────────────────
+// ── 8. GET /api/monitoring/risk ────────────────────────────────────────
 router.get('/risk', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      return res.json({ overallRiskScore: 25, factors: [] });
-    } catch (e) { return res.status(500).json({ error: e.message }); }
+      // Real risk calculation from Security Hub findings
+      const db = await getDatabase();
+      const accounts = await db.all(
+        "SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active'",
+        [req.tenantId, req.userId]
+      );
+      let totalFindings = 0;
+      let criticalCount = 0;
+      let highCount = 0;
+      const factors = [];
+
+      for (const account of accounts) {
+        try {
+          const providerInstance = ProviderFactory.getProvider(account);
+          const secData = await providerInstance.getSecurity();
+          totalFindings += secData.totalFindings || 0;
+          criticalCount += secData.criticalAlerts || 0;
+          highCount += secData.highAlerts || 0;
+          if (secData.criticalAlerts > 0) {
+            factors.push({ factor: `${secData.criticalAlerts} critical findings in ${account.account_name}`, impact: 'Critical', provider: 'aws' });
+          }
+          if (secData.highAlerts > 0) {
+            factors.push({ factor: `${secData.highAlerts} high-severity findings in ${account.account_name}`, impact: 'High', provider: 'aws' });
+          }
+        } catch (err) {
+          factors.push({ factor: `Security scan failed for ${account.account_name}: ${err.message}`, impact: 'Unknown', provider: 'aws' });
+        }
+      }
+
+      // Calculate real risk score: base 10 + 15 per critical + 5 per high
+      const overallRiskScore = Math.min(100, 10 + (criticalCount * 15) + (highCount * 5));
+
+      return res.json({
+        overallRiskScore: accounts.length > 0 ? overallRiskScore : null,
+        totalFindings,
+        criticalCount,
+        highCount,
+        factors,
+        provider: 'aws',
+        accountsScanned: accounts.length,
+        noAccountsConfigured: accounts.length === 0
+      });
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
+    }
   }
 
   const { resourceGroup } = req.query;
@@ -438,18 +534,57 @@ router.get('/risk', async (req, res) => {
     const data = await calculateRiskScore(req.tenantId, sub.id, resourceGroup || null, userAccessToken);
     res.json(data);
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/risk failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const { status, payload } = classifyCloudError(err, 'azure');
+    res.status(status).json(payload);
   }
 });
 
-// ── 9. GET /api/monitoring/cloud-health ─────────────────────
+// ── 9. GET /api/monitoring/cloud-health ───────────────────────────────
 router.get('/cloud-health', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      return res.json({ score: 95, factors: [] });
-    } catch (e) { return res.status(500).json({ error: e.message }); }
+      // Real AWS Health Dashboard data
+      const db = await getDatabase();
+      const account = subscriptionId
+        ? await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND (id = ? OR account_id = ?) AND user_id = ?',
+          [req.tenantId, 'aws', subscriptionId, subscriptionId, req.userId])
+        : await db.get("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active' LIMIT 1",
+          [req.tenantId, req.userId]);
+
+      if (!account) {
+        return res.json({
+          score: null,
+          factors: [],
+          provider: 'aws',
+          noAccountConfigured: true,
+          message: 'No AWS account configured'
+        });
+      }
+
+      const providerInstance = ProviderFactory.getProvider(account);
+      const healthData = await providerInstance.getHealth();
+      const healthScore = healthData.events.length === 0 ? 100 : Math.max(0, 100 - (healthData.events.length * 10));
+
+      return res.json({
+        score: healthScore,
+        status: healthData.status,
+        events: healthData.events,
+        factors: healthData.events.map(e => ({
+          factor: e.title || e.eventTypeCode,
+          service: e.service,
+          region: e.region,
+          status: e.status,
+          provider: 'aws'
+        })),
+        provider: 'aws'
+      });
+    } catch (e) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const classified = classifyCloudError(e, 'aws');
+      return res.status(classified.status).json(classified.body);
+    }
   }
 
   const userAccessToken = req.azureAccessToken || req.headers['x-azure-token'] || null;
@@ -500,7 +635,11 @@ router.get('/usage', async (req, res) => {
       const providerInstance = ProviderFactory.getProvider(account);
       const usage = await providerInstance.getUsage();
       return res.json(usage);
-    } catch (e) { return res.status(500).json({ error: e.message }); }
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'aws');
+      return res.status(status).json(payload);
+    }
   }
 
   const { location } = req.query;
@@ -513,8 +652,9 @@ router.get('/usage', async (req, res) => {
     const data = await getVmUsageAndCredits(req.tenantId, sub.id, location || 'eastus', userAccessToken);
     res.json(data);
   } catch (err) {
-    console.error('[ROUTES] GET /monitoring/usage failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const { classifyCloudError } = require('../middleware/errorClassifier');
+    const { status, payload } = classifyCloudError(err, 'azure');
+    res.status(status).json(payload);
   }
 });
 // ============================================================
@@ -522,10 +662,10 @@ router.get('/usage', async (req, res) => {
 // Aggregate data from all connected cloud accounts
 // ============================================================
 
-// Helper: Get all AWS accounts for a tenant and run a provider method
-async function aggregateAwsData(tenantId, methodName, ...args) {
+// Helper: Get all AWS accounts for a tenant and run a provider method with strict user isolation
+async function aggregateAwsData(tenantId, userId, methodName, ...args) {
   const db = await getDatabase();
-  const awsAccounts = await db.all("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = 'aws' AND status = 'Active'", [tenantId]);
+  const awsAccounts = await db.all("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active'", [tenantId, userId]);
   const results = [];
 
   for (const account of awsAccounts) {
@@ -558,9 +698,9 @@ router.get('/security/unified', async (req, res) => {
         const db = await getDatabase();
                 let azureSubs = [];
         if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
         } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -588,7 +728,7 @@ router.get('/security/unified', async (req, res) => {
 
     // AWS data (if not filtered to azure only)
     if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, 'getSecurity');
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getSecurity');
       for (const { account, data } of awsResults) {
         if (data.securityScore?.percentage) {
           totalScore += data.securityScore.percentage;
@@ -617,8 +757,8 @@ router.get('/security/unified', async (req, res) => {
     await setCache(cacheKey, result, 300);
     res.json(result);
   } catch (err) {
-    console.error('[Unified Security] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    const { status, payload } = classifyCloudError(err, 'unknown');
+    res.status(status).json(payload);
   }
 });
 
@@ -640,9 +780,9 @@ router.get('/cost/unified', async (req, res) => {
         const db = await getDatabase();
                 let azureSubs = [];
         if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
         } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -666,7 +806,7 @@ router.get('/cost/unified', async (req, res) => {
 
     // AWS cost
     if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, 'getCost');
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getCost');
       for (const { account, data } of awsResults) {
         totalCost += data.currentMonthCost || 0;
         totalForecast += data.forecastCost || 0;
@@ -692,8 +832,8 @@ router.get('/cost/unified', async (req, res) => {
     await setCache(cacheKey, result, 3600);
     res.json(result);
   } catch (err) {
-    console.error('[Unified Cost] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    const { status, payload } = classifyCloudError(err, 'unknown');
+    res.status(status).json(payload);
   }
 });
 
@@ -717,9 +857,9 @@ router.get('/compliance/unified', async (req, res) => {
         const db = await getDatabase();
                 let azureSubs = [];
         if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
         } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -739,7 +879,7 @@ router.get('/compliance/unified', async (req, res) => {
 
     // AWS compliance
     if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, 'getCompliance', framework || 'HIPAA');
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getCompliance', framework || 'HIPAA');
       for (const { account, data } of awsResults) {
         if (data.score !== undefined) { totalScore += data.score; scoreCount++; }
         totalControls += data.totalControls || 0;
@@ -760,8 +900,8 @@ router.get('/compliance/unified', async (req, res) => {
     await setCache(cacheKey, result, 300);
     res.json(result);
   } catch (err) {
-    console.error('[Unified Compliance] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    const { status, payload } = classifyCloudError(err, 'unknown');
+    res.status(status).json(payload);
   }
 });
 
@@ -827,8 +967,8 @@ router.get('/executive', async (req, res) => {
     await setCache(cacheKey, result, 300);
     return res.json(result);
   } catch (err) {
-    console.error('[Executive] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    const { status, payload } = classifyCloudError(err, 'unknown');
+    res.status(status).json(payload);
   }
 });
 
@@ -840,7 +980,7 @@ router.get('/audit/unified', async (req, res) => {
 
     // AWS CloudTrail
     if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, 'getAuditLogs');
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getAuditLogs');
       for (const { account, data } of awsResults) {
         for (const event of (data || [])) {
           allEvents.push({ ...event, accountName: account.account_name });
@@ -853,8 +993,8 @@ router.get('/audit/unified', async (req, res) => {
 
     res.json({ events: allEvents.slice(0, 100) });
   } catch (err) {
-    console.error('[Unified Audit] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    const { status, payload } = classifyCloudError(err, 'unknown');
+    res.status(status).json(payload);
   }
 });
 
@@ -876,9 +1016,9 @@ router.get('/backup/unified', async (req, res) => {
         const db = await getDatabase();
                 let azureSubs = [];
         if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
         } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -903,7 +1043,7 @@ router.get('/backup/unified', async (req, res) => {
 
     // AWS Backup
     if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, 'getBackup');
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getBackup');
       for (const { account, data } of awsResults) {
         totalProtected += data.totalProtectedItems || 0;
         totalHealthy += data.healthyItems || 0;
@@ -937,8 +1077,8 @@ router.get('/backup/unified', async (req, res) => {
       details,
     });
   } catch (err) {
-    console.error('[Unified Backup] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    const { status, payload } = classifyCloudError(err, 'unknown');
+    res.status(status).json(payload);
   }
 });
 

@@ -111,6 +111,7 @@ export default function ExecutiveDashboard() {
   const providerDistribution = [
     { name: 'Azure', value: azureResources, color: PROVIDER_COLORS.azure },
     { name: 'AWS', value: awsResources, color: PROVIDER_COLORS.aws },
+    { name: 'GCP', value: gcpResources, color: PROVIDER_COLORS.gcp },
   ].filter(d => d.value > 0);
 
   const providerTabs: { label: string; value: CloudProvider; icon: string }[] = [
@@ -188,14 +189,13 @@ export default function ExecutiveDashboard() {
                   border: 'none',
                   fontSize: 12,
                   fontWeight: 600,
-                  cursor: tab.value === 'gcp' ? 'not-allowed' : 'pointer',
-                  opacity: tab.value === 'gcp' ? 0.4 : 1,
+                  cursor: 'pointer',
+                  opacity: 1,
                   background: selectedProvider === tab.value ? 'var(--azure-500)' : 'transparent',
                   color: selectedProvider === tab.value ? 'white' : 'var(--text-secondary)',
                   transition: 'all 150ms ease',
                 }}
-                disabled={tab.value === 'gcp'}
-                title={tab.value === 'gcp' ? 'Coming Soon' : tab.label}
+                title={tab.label}
               >
                 {tab.icon} {tab.label}
               </button>
@@ -210,8 +210,8 @@ export default function ExecutiveDashboard() {
 
       {/* KPI Grid */}
       <div className="kpi-grid">
-        <KpiCard label="Cloud Accounts" value={String(cloudAccounts.length)} rawValue={cloudAccounts.length} icon={Cloud} color="#0078d4" subtitle={`Azure: ${azureAccounts} • AWS: ${awsAccounts}`} />
-        <KpiCard label="Total Resources" value={fmtNumber(totalResources)} rawValue={totalResources} icon={Server} color="#00B7C3" subtitle={`Azure: ${azureResources} • AWS: ${awsResources}`} />
+        <KpiCard label="Cloud Accounts" value={String(cloudAccounts.length)} rawValue={cloudAccounts.length} icon={Cloud} color="#0078d4" subtitle={`Azure: ${azureAccounts} • AWS: ${awsAccounts} • GCP: ${gcpAccounts}`} />
+        <KpiCard label="Total Resources" value={fmtNumber(totalResources)} rawValue={totalResources} icon={Server} color="#00B7C3" subtitle={`Azure: ${azureResources} • AWS: ${awsResources} • GCP: ${gcpResources}`} />
         <KpiCard label="Monthly Spend" value={fmtCurrency(spend)} rawValue={spend} isCurrency={true} icon={DollarSign} color="#107C10" subtitle="Current billing period" />
         <KpiCard label="Security Score" value={secScore != null ? `${Math.round(secScore)}%` : '—'} rawValue={secScore != null ? Math.round(secScore) : undefined} icon={Shield} color={secScore != null && secScore >= 80 ? '#107C10' : '#FFB900'} subtitle="Cross-cloud posture" />
         <KpiCard label="Open Incidents" value={String(openIncidents)} rawValue={openIncidents} icon={AlertTriangle} color={criticalIncidents > 0 ? '#D13438' : '#FFB900'} subtitle={`${criticalIncidents} critical`} />

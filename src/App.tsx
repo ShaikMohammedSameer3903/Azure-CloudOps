@@ -47,6 +47,13 @@ const AwsGovernance = lazy(() => import('./pages/aws/AwsGovernance'));
 const AwsBackup = lazy(() => import('./pages/aws/AwsBackup'));
 const AwsReports = lazy(() => import('./pages/aws/AwsReports'));
 
+// ── GCP Pages ──
+const GcpDashboard = lazy(() => import('./pages/GcpDashboard'));
+const GcpResources = lazy(() => import('./pages/gcp/GcpResources'));
+const GcpSecurity = lazy(() => import('./pages/gcp/GcpSecurity'));
+const GcpCost = lazy(() => import('./pages/gcp/GcpCost'));
+const GcpMonitoring = lazy(() => import('./pages/gcp/GcpMonitoring'));
+
 // ── Multi-Cloud Pages ──
 const ExecutiveDashboard = lazy(() => import('./pages/ExecutiveDashboard'));
 const MultiCloudDashboard = lazy(() => import('./pages/MultiCloudDashboard'));
@@ -118,6 +125,13 @@ function AnimatedRoutes() {
         <Route path="/aws/ai"                    element={<AnimatedPage><AwsAiAssistant /></AnimatedPage>} />
         <Route path="/aws/reports"               element={<AnimatedPage><AwsReports /></AnimatedPage>} />
 
+        {/* ── GCP Section ── */}
+        <Route path="/gcp"                       element={<AnimatedPage><GcpDashboard /></AnimatedPage>} />
+        <Route path="/gcp/resources"             element={<AnimatedPage><GcpResources /></AnimatedPage>} />
+        <Route path="/gcp/security"              element={<AnimatedPage><GcpSecurity /></AnimatedPage>} />
+        <Route path="/gcp/cost"                  element={<AnimatedPage><GcpCost /></AnimatedPage>} />
+        <Route path="/gcp/monitoring"            element={<AnimatedPage><GcpMonitoring /></AnimatedPage>} />
+
         {/* ── Multi-Cloud Section ── */}
         <Route path="/multicloud"                element={<AnimatedPage><ExecutiveDashboard /></AnimatedPage>} />
         <Route path="/multicloud/operations"     element={<AnimatedPage><MultiCloudDashboard /></AnimatedPage>} />
@@ -145,7 +159,6 @@ function AnimatedRoutes() {
         <Route path="/unified/cost"              element={<Navigate to="/multicloud/analytics" replace />} />
         <Route path="/unified/governance"        element={<Navigate to="/multicloud/governance" replace />} />
         <Route path="/unified/backup"            element={<Navigate to="/multicloud/operations" replace />} />
-        <Route path="/gcp"                       element={<Navigate to="/" replace />} />
 
         {/* ── Catch-all ── */}
         <Route path="*"                          element={<Navigate to="/" replace />} />
@@ -234,10 +247,7 @@ export default function App() {
       };
       loadSubscriptions();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, user?.id]);
-
-  
 
   // Smart background sync — every 30s, silently passes the Azure token
   useEffect(() => {
@@ -460,6 +470,7 @@ function AppShell() {
   useEffect(() => {
     if (location.pathname.startsWith('/azure')) setSelectedProvider('azure');
     else if (location.pathname.startsWith('/aws')) setSelectedProvider('aws');
+    else if (location.pathname.startsWith('/gcp')) setSelectedProvider('gcp');
     else if (location.pathname.startsWith('/multicloud')) setSelectedProvider('all');
     else if (location.pathname === '/') setSelectedProvider('all');
   }, [location.pathname, setSelectedProvider]);

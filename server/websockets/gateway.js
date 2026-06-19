@@ -57,36 +57,28 @@ function initGateway(server) {
     const token = socket.handshake.auth.token || socket.handshake.headers['x-auth-token'];
     
     if (!token) {
-      if (process.env.NODE_ENV === 'development') {
-        socket.tenantId = 'dev-tenant';
-        socket.userEmail = 'dev@local.com';
-        return next();
-      }
       return next(new Error("Authentication error"));
     }
 
     jwt.verify(token, getKey, { algorithms: ['RS256', 'HS256'] }, (err, decoded) => {
       if (err) {
-        // Fallback for dev mocks
-        if (process.env.NODE_ENV === 'development' && token.startsWith('mock_')) {
-          socket.tenantId = 'dev-tenant';
-          socket.userEmail = 'dev@local.com';
-          return next();
-        }
         return next(new Error("Authentication error"));
       }
       
-      socket.tenantId = decoded.tid || decoded.tenantId || 'dev-tenant';
+      socket.tenantId = decoded.tid || decoded.tenantId;
+      socket.userId = decoded.oid || decoded.id;
       socket.userEmail = decoded.preferred_username || decoded.email || 'user';
       next();
     });
   });
 
   io.on('connection', (socket) => {
-    console.log(`[WebSocket] Client connected: ${socket.id} (Tenant: ${socket.tenantId})`);
+    console.log(`[WebSocket] Client connected: ${socket.id} (User: ${socket.userId})`);
     
-    // Join tenant-specific room for isolated broadcasting
-    socket.join(`tenant:${socket.tenantId}`);
+    // Join user-specific room for strictly isolated broadcasting
+    if (socket.userId) {
+      socket.join(`user:${socket.userId}`);
+    }
 
     socket.on('disconnect', () => {
       console.log(`[WebSocket] Client disconnected: ${socket.id}`);
@@ -104,16 +96,16 @@ function getIo() {
 }
 
 /**
- * Broadcast an event to a specific tenant
+ * Broadcast an event to a specific user
  */
-function broadcastToTenant(tenantId, eventType, payload) {
+function broadcastToUser(userId, eventType, payload) {
   if (io) {
-    io.to(`tenant:${tenantId}`).emit(eventType, payload);
+    io.to(`user:${userId}`).emit(eventType, payload);
   }
 }
 
 module.exports = {
   initGateway,
   getIo,
-  broadcastToTenant
+  broadcastToUser
 };

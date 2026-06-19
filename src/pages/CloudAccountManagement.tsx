@@ -50,6 +50,17 @@ export default function CloudAccountManagement() {
         </div>
       </div>
 
+      {cloudAccounts.some(acc => acc.status === 'Failed') && (
+        <div style={{ padding: '12px 24px', background: 'rgba(209, 52, 56, 0.1)', border: '1px solid rgba(209, 52, 56, 0.2)', borderRadius: 6, color: '#D13438', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, fontSize: 14 }}>
+          <AlertTriangle size={18} />
+          <span>
+            {cloudAccounts.some(acc => acc.status === 'Failed' && acc.provider === 'aws')
+              ? 'Unable to discover AWS resources. Please verify permissions or credential configuration.'
+              : 'Warning: One or more cloud accounts failed resource discovery. Please verify permissions or credential configuration.'}
+          </span>
+        </div>
+      )}
+
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         {cloudAccounts.length === 0 ? (
           <div style={{ padding: 60, textAlign: 'center', color: 'var(--text-secondary)' }}>
@@ -83,9 +94,15 @@ export default function CloudAccountManagement() {
                     {account.subscription_id || account.account_id || (account as any).project_id || 'Unknown ID'}
                   </td>
                   <td style={{ padding: '16px 24px' }}>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#107C10', fontSize: 13, fontWeight: 600 }}>
-                      <CheckCircle size={14} /> Connected
-                    </div>
+                    {account.status === 'Failed' ? (
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#D13438', fontSize: 13, fontWeight: 600 }} title="Discovery failed: Unable to discover resources.">
+                        <AlertTriangle size={14} /> Discovery Failed
+                      </div>
+                    ) : (
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#107C10', fontSize: 13, fontWeight: 600 }}>
+                        <CheckCircle size={14} /> Connected
+                      </div>
+                    )}
                   </td>
                   <td style={{ padding: '16px 24px', textAlign: 'right' }}>
                     <div style={{ display: 'inline-flex', gap: 8 }}>

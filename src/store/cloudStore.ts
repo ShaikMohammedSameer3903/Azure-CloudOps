@@ -169,6 +169,9 @@ interface CloudState {
   // ── Onboarding State ──
   hasSkippedOnboarding: boolean;
   setHasSkippedOnboarding: (skipped: boolean) => void;
+
+  // ── Reset ──
+  clearAllState: () => void;
 }
 
 export const useCloudStore = create<CloudState>()(
@@ -242,6 +245,21 @@ export const useCloudStore = create<CloudState>()(
       // ── Onboarding State ──
       hasSkippedOnboarding: false,
       setHasSkippedOnboarding: (hasSkippedOnboarding) => set({ hasSkippedOnboarding }),
+
+      // ── Reset ──
+      clearAllState: () => set({
+        selectedProvider: 'all',
+        activeScope: 'ALL',
+        cloudAccounts: [],
+        executiveMetrics: null,
+        unifiedResources: [],
+        unifiedIncidents: [],
+        unifiedCosts: null,
+        unifiedCompliance: null,
+        unifiedBackup: null,
+        unifiedSecurity: null,
+        hasSkippedOnboarding: false,
+      }),
     }),
     {
       name: 'cloudops-cloud-store-v1',

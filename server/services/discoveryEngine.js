@@ -31,8 +31,8 @@ function startDiscoveryScheduler() {
           const discovered = await discoverAllResources(sub.tenant_id, sub.id, null);
           console.log(`[DISCOVERY-SCHEDULER] Done: "${sub.name}" → ${discovered.length} resources`);
 
-          const { broadcastToTenant } = require('../websockets/gateway');
-          broadcastToTenant(sub.tenant_id, 'RESOURCE_DISCOVERED', { subscriptionId: sub.id });
+          const { broadcastToUser } = require('../websockets/gateway');
+          broadcastToUser(sub.user_id, 'RESOURCE_DISCOVERED', { subscriptionId: sub.id });
         } catch (subErr) {
           if (subErr.code === 'AZURE_NOT_CONFIGURED') {
             console.warn(`[DISCOVERY-SCHEDULER] "${sub.name}" — no credentials. Skipping.`);
@@ -45,7 +45,21 @@ function startDiscoveryScheduler() {
       // AWS Account Sync
       const awsAccounts = await db.all("SELECT * FROM cloud_accounts WHERE provider = 'aws' AND status = 'Active'");
       for (const account of awsAccounts) {
-        await discoverAwsAccount(account.id);
+        try {
+          await discoverAwsAccount(account.id);
+        } catch (awsErr) {
+          console.error(`[DISCOVERY-SCHEDULER] AWS scan failed for ${account.account_name}:`, awsErr.message);
+        }
+      }
+
+      // GCP Account Sync
+      const gcpAccounts = await db.all("SELECT * FROM cloud_accounts WHERE provider = 'gcp' AND status = 'Active'");
+      for (const account of gcpAccounts) {
+        try {
+          await discoverGcpAccount(account.id);
+        } catch (gcpErr) {
+          console.error(`[DISCOVERY-SCHEDULER] GCP scan failed for ${account.account_name}:`, gcpErr.message);
+        }
       }
 
     } catch (err) {
@@ -63,7 +77,7 @@ async function discoverAwsAccount(accountId) {
   const account = await db.get("SELECT * FROM cloud_accounts WHERE id = ?", [accountId]);
   if (!account) {
     console.warn(`[DISCOVERY] AWS account ${accountId} not found.`);
-    return;
+    return [];
   }
   
   try {
@@ -74,18 +88,18 @@ async function discoverAwsAccount(accountId) {
     
     for (const resource of resources) {
       await db.run(`
-        INSERT OR REPLACE INTO resources (id, name, type, region, status, provider, tags, resource_group, subscription_id, cloud_account_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO resources (id, name, type, location, status, provider, tags, resource_group, subscription_id, cloud_account_id, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
-        resource.id, resource.name, resource.type, resource.region, resource.status,
+        resource.id, resource.name, resource.type, resource.region || 'global', resource.status,
         resource.provider, JSON.stringify(resource.tags || {}), resource.resourceGroup || null,
-        account.id, account.id
+        account.id, account.id, account.user_id
       ]);
     }
     await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [account.id]);
     
-    const { broadcastToTenant } = require('../websockets/gateway');
-    broadcastToTenant(account.tenant_id, 'RESOURCE_DISCOVERED', { accountId: account.account_id, provider: 'aws' });
+    const { broadcastToUser } = require('../websockets/gateway');
+    broadcastToUser(account.user_id, 'RESOURCE_DISCOVERED', { accountId: account.account_id, provider: 'aws' });
 
     await db.run(`
       INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
@@ -96,6 +110,7 @@ async function discoverAwsAccount(accountId) {
     })]);
 
     console.log(`[DISCOVERY] Done AWS: "${account.account_name}" → ${resources.length} resources`);
+    return resources;
   } catch (awsErr) {
     console.error(`[DISCOVERY] Error scanning AWS "${account.account_name}": ${awsErr.message}`);
     try {
@@ -109,6 +124,97 @@ async function discoverAwsAccount(accountId) {
     } catch (auditErr) {
       console.error('[DISCOVERY] Failed to write AWS failure audit log:', auditErr.message);
     }
+    throw awsErr;
+  }
+}
+
+/**
+ * Triggers an immediate async scan for a GCP account.
+ */
+async function discoverGcpAccount(accountId) {
+  const startMs = Date.now();
+  const db = await getDatabase();
+  const account = await db.get("SELECT * FROM cloud_accounts WHERE id = ?", [accountId]);
+  if (!account) {
+    console.warn(`[DISCOVERY] GCP account ${accountId} not found.`);
+    return [];
+  }
+  
+  try {
+    console.log(`[DISCOVERY] Scanning GCP: "${account.account_name}"`);
+    const ProviderFactory = require('../providers/ProviderFactory');
+    const providerInstance = ProviderFactory.getProvider(account);
+    const resources = await providerInstance.getResources();
+    
+    for (const resource of resources) {
+      await db.run(`
+        INSERT OR REPLACE INTO resources (id, name, type, location, status, provider, tags, resource_group, subscription_id, cloud_account_id, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        resource.id, resource.name, resource.type, resource.region || 'global', resource.status,
+        resource.provider, JSON.stringify(resource.tags || {}), resource.resourceGroup || null,
+        account.id, account.id, account.user_id
+      ]);
+    }
+    await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [account.id]);
+    
+    const { broadcastToUser } = require('../websockets/gateway');
+    broadcastToUser(account.user_id, 'RESOURCE_DISCOVERED', { accountId: account.account_id, provider: 'gcp' });
+
+    await db.run(`
+      INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
+      VALUES (?, 'system', 'discovery-engine@cloudops.internal', 'DISCOVERY_COMPLETED', 'GCPSubscription', ?, ?)
+    `, [account.tenant_id || 'demo-org-001', account.account_id, JSON.stringify({
+      count: resources.length,
+      durationMs: Date.now() - startMs
+    })]);
+
+    console.log(`[DISCOVERY] Done GCP: "${account.account_name}" → ${resources.length} resources`);
+    return resources;
+  } catch (gcpErr) {
+    console.error(`[DISCOVERY] Error scanning GCP "${account.account_name}": ${gcpErr.message}`);
+    try {
+      await db.run(`
+        INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
+        VALUES (?, 'system', 'discovery-engine@cloudops.internal', 'DISCOVERY_FAILED', 'GCPSubscription', ?, ?)
+      `, [account.tenant_id || 'demo-org-001', account.account_id, JSON.stringify({
+        error: gcpErr.message || String(gcpErr),
+        durationMs: Date.now() - startMs
+      })]);
+    } catch (auditErr) {
+      console.error('[DISCOVERY] Failed to write GCP failure audit log:', auditErr.message);
+    }
+    throw gcpErr;
+  }
+}
+
+/**
+ * Unified provider-agnostic discovery execution.
+ */
+async function discoverCloudAccount(tenantId, accountId, userAccessToken = null) {
+  const db = await getDatabase();
+  const account = await db.get("SELECT * FROM cloud_accounts WHERE id = ?", [accountId]);
+  if (!account) {
+    // Fallback: check if it's an azure_subscription directly
+    const sub = await db.get("SELECT * FROM azure_subscriptions WHERE id = ?", [accountId]);
+    if (sub) {
+      const resources = await discoverAllResources(tenantId, accountId, userAccessToken);
+      return { resourceCount: resources.length };
+    }
+    throw new Error(`Cloud account ${accountId} not found.`);
+  }
+
+  if (account.provider === 'aws') {
+    const resources = await discoverAwsAccount(accountId);
+    return { resourceCount: resources.length };
+  } else if (account.provider === 'gcp') {
+    const resources = await discoverGcpAccount(accountId);
+    return { resourceCount: resources.length };
+  } else if (account.provider === 'azure') {
+    const resources = await discoverAllResources(tenantId, accountId, userAccessToken);
+    return { resourceCount: resources.length };
+  } else {
+    throw new Error(`Unsupported cloud provider: ${account.provider}`);
   }
 }
 
@@ -117,13 +223,15 @@ async function discoverAwsAccount(accountId) {
 /**
  * Triggers an immediate async scan for a subscription.
  */
-function triggerImmediateScan(tenantId, subscriptionId, userAccessToken = null) {
+function triggerImmediateScan(tenantId, subscriptionId, userAccessToken = null, userId = null) {
   console.log(`[DISCOVERY] triggerImmediateScan → subId=*** hasToken=${!!userAccessToken}`);
   discoverAllResources(tenantId, subscriptionId, userAccessToken)
     .then((discovered) => {
       console.log(`[DISCOVERY] Immediate scan complete → ${discovered.length} resources for subId=***`);
-      const { broadcastToTenant } = require('../websockets/gateway');
-      broadcastToTenant(tenantId, 'RESOURCE_DISCOVERED', { subscriptionId });
+      if (userId) {
+        const { broadcastToUser } = require('../websockets/gateway');
+        broadcastToUser(userId, 'RESOURCE_DISCOVERED', { subscriptionId });
+      }
     })
     .catch(err => {
       console.error(`[DISCOVERY] Immediate scan failed for subId=${subscriptionId}: ${err.message}`);
@@ -344,10 +452,10 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
 
       await db.run(`
         INSERT INTO resources (
-          id, subscription_id, resource_group, name, type, location, status, tags, raw_payload,
+          id, subscription_id, user_id, resource_group, name, type, location, status, tags, raw_payload,
           owner, last_modified, cost_impact, risk_score, health_status, last_discovered_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           status = excluded.status,
@@ -360,7 +468,7 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
           health_status = excluded.health_status,
           last_discovered_at = CURRENT_TIMESTAMP
       `, [
-        resourceId, sub.id, resourceGroup, name, parsedType, location,
+        resourceId, sub.id, sub.user_id, resourceGroup, name, parsedType, location,
         status, tags, JSON.stringify(rawPayload), owner, lastModified,
         costImpact, riskScore, healthStatus
       ]);
@@ -541,6 +649,8 @@ async function listResourceGroupsWithCounts(tenantId, subscriptionId, userAccess
 module.exports = {
   discoverAllResources,
   discoverAwsAccount,
+  discoverGcpAccount,
+  discoverCloudAccount,
   discoverResourcesByGroup,
   listResourceGroupsWithCounts,
   startDiscoveryScheduler,

@@ -2,7 +2,7 @@ const awsSecurityService = require('../services/awsSecurityService');
 
 exports.getDashboardStats = async (req, res) => {
   try {
-    const stats = await awsSecurityService.getDashboardStats();
+    const stats = await awsSecurityService.getDashboardStats(req.tenantId, req.userId);
     res.json(stats);
   } catch (error) {
     console.error('[SECURITY] getDashboardStats failed:', error.message);
@@ -12,7 +12,7 @@ exports.getDashboardStats = async (req, res) => {
 
 exports.getEvents = async (req, res) => {
   try {
-    const events = await awsSecurityService.getAllEvents();
+    const events = await awsSecurityService.getAllEvents(req.tenantId, req.userId);
     res.json(events);
   } catch (error) {
     console.error('[SECURITY] getEvents failed:', error.message);
@@ -24,7 +24,7 @@ exports.remediateEvent = async (req, res) => {
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ error: 'Incident ID required' });
-    const result = await awsSecurityService.triggerManualRemediation(id);
+    const result = await awsSecurityService.triggerManualRemediation(req.tenantId, req.userId, id);
     res.json(result);
   } catch (error) {
     console.error('[SECURITY] remediateEvent failed:', error.message);
@@ -36,7 +36,7 @@ exports.acknowledgeEvent = async (req, res) => {
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ error: 'Incident ID required' });
-    const result = await awsSecurityService.acknowledgeEvent(id);
+    const result = await awsSecurityService.acknowledgeEvent(req.tenantId, req.userId, id);
     res.json(result);
   } catch (error) {
     console.error('[SECURITY] acknowledgeEvent failed:', error.message);
@@ -46,7 +46,7 @@ exports.acknowledgeEvent = async (req, res) => {
 
 exports.getThreats = async (req, res) => {
   try {
-    const events = await awsSecurityService.getAllEvents();
+    const events = await awsSecurityService.getAllEvents(req.tenantId, req.userId);
     const threats = events.filter(e => e.severity === 'CRITICAL' || e.severity === 'HIGH');
     res.json(threats);
   } catch (error) {

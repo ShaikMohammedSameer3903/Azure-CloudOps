@@ -385,7 +385,157 @@ class AwsProvider extends CloudProvider {
         }
       } catch (err) { console.warn(`[AWS] ${region} ASG failed:`, err.message); }
 
-      
+      // Networking - Internet Gateways
+      try {
+        const { DescribeInternetGatewaysCommand } = require('@aws-sdk/client-ec2');
+        const ec2 = new EC2Client(config);
+        const igwRes = await ec2.send(new DescribeInternetGatewaysCommand({}));
+        for (const igw of (igwRes.InternetGateways || [])) {
+          resources.push({
+            id: igw.InternetGatewayId, provider: 'aws', type: 'AWS::EC2::InternetGateway',
+            name: (igw.Tags||[]).find(t=>t.Key==='Name')?.Value || igw.InternetGatewayId,
+            region, status: 'available', resourceGroup: 'Networking', tags: this._tagsToMap(igw.Tags),
+            properties: { attachments: (igw.Attachments||[]).map(a => ({ vpcId: a.VpcId, state: a.State })) }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} IGW failed:`, err.message); }
+
+      // Networking - NAT Gateways
+      try {
+        const { DescribeNatGatewaysCommand } = require('@aws-sdk/client-ec2');
+        const ec2 = new EC2Client(config);
+        const natRes = await ec2.send(new DescribeNatGatewaysCommand({ MaxResults: 100 }));
+        for (const nat of (natRes.NatGateways || [])) {
+          resources.push({
+            id: nat.NatGatewayId, provider: 'aws', type: 'AWS::EC2::NatGateway',
+            name: (nat.Tags||[]).find(t=>t.Key==='Name')?.Value || nat.NatGatewayId,
+            region, status: nat.State || 'available', resourceGroup: 'Networking', tags: this._tagsToMap(nat.Tags),
+            properties: { subnetId: nat.SubnetId, vpcId: nat.VpcId, connectivityType: nat.ConnectivityType }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} NAT GW failed:`, err.message); }
+
+      // Networking - Network ACLs
+      try {
+        const { DescribeNetworkAclsCommand } = require('@aws-sdk/client-ec2');
+        const ec2 = new EC2Client(config);
+        const naclRes = await ec2.send(new DescribeNetworkAclsCommand({}));
+        for (const nacl of (naclRes.NetworkAcls || [])) {
+          resources.push({
+            id: nacl.NetworkAclId, provider: 'aws', type: 'AWS::EC2::NetworkAcl',
+            name: (nacl.Tags||[]).find(t=>t.Key==='Name')?.Value || nacl.NetworkAclId,
+            region, status: 'available', resourceGroup: 'Networking', tags: this._tagsToMap(nacl.Tags),
+            properties: { vpcId: nacl.VpcId, isDefault: nacl.IsDefault, entriesCount: (nacl.Entries||[]).length }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} NACLs failed:`, err.message); }
+
+      // Networking - Route Tables
+      try {
+        const { DescribeRouteTablesCommand } = require('@aws-sdk/client-ec2');
+        const ec2 = new EC2Client(config);
+        const rtRes = await ec2.send(new DescribeRouteTablesCommand({}));
+        for (const rt of (rtRes.RouteTables || [])) {
+          resources.push({
+            id: rt.RouteTableId, provider: 'aws', type: 'AWS::EC2::RouteTable',
+            name: (rt.Tags||[]).find(t=>t.Key==='Name')?.Value || rt.RouteTableId,
+            region, status: 'available', resourceGroup: 'Networking', tags: this._tagsToMap(rt.Tags),
+            properties: { vpcId: rt.VpcId, routeCount: (rt.Routes||[]).length }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} Route Tables failed:`, err.message); }
+
+      // Database - ElastiCache
+      try {
+        const { ElastiCacheClient, DescribeCacheClustersCommand } = require('@aws-sdk/client-elasticache');
+        const ec = new ElastiCacheClient(config);
+        const ecRes = await ec.send(new DescribeCacheClustersCommand({ MaxRecords: 100 }));
+        for (const cluster of (ecRes.CacheClusters || [])) {
+          resources.push({
+            id: cluster.ARN || `arn:aws:elasticache:${region}:*:cluster:${cluster.CacheClusterId}`,
+            provider: 'aws', type: 'AWS::ElastiCache::CacheCluster',
+            name: cluster.CacheClusterId, region, status: cluster.CacheClusterStatus || 'available',
+            resourceGroup: 'Databases', tags: {},
+            properties: { engine: cluster.Engine, engineVersion: cluster.EngineVersion, nodeType: cluster.CacheNodeType, numNodes: cluster.NumCacheNodes }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} ElastiCache failed:`, err.message); }
+
+      // Database - Redshift Clusters
+      try {
+        const { RedshiftClient, DescribeClustersCommand: RSDescribeClustersCommand } = require('@aws-sdk/client-redshift');
+        const rs = new RedshiftClient(config);
+        const rsRes = await rs.send(new RSDescribeClustersCommand({ MaxRecords: 100 }));
+        for (const cluster of (rsRes.Clusters || [])) {
+          resources.push({
+            id: `arn:aws:redshift:${region}:*:cluster:${cluster.ClusterIdentifier}`,
+            provider: 'aws', type: 'AWS::Redshift::Cluster',
+            name: cluster.ClusterIdentifier, region, status: cluster.ClusterStatus || 'available',
+            resourceGroup: 'Databases', tags: this._tagsToMap(cluster.Tags),
+            properties: { nodeType: cluster.NodeType, numberOfNodes: cluster.NumberOfNodes, dbName: cluster.DBName }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} Redshift failed:`, err.message); }
+
+      // Storage - EFS
+      try {
+        const { EFSClient, DescribeFileSystemsCommand } = require('@aws-sdk/client-efs');
+        const efs = new EFSClient(config);
+        const efsRes = await efs.send(new DescribeFileSystemsCommand({ MaxItems: 100 }));
+        for (const fs of (efsRes.FileSystems || [])) {
+          resources.push({
+            id: fs.FileSystemArn || fs.FileSystemId,
+            provider: 'aws', type: 'AWS::EFS::FileSystem',
+            name: fs.Name || fs.FileSystemId, region, status: fs.LifeCycleState || 'available',
+            resourceGroup: 'Storage', tags: this._tagsToMap(fs.Tags),
+            properties: { sizeInBytes: fs.SizeInBytes?.Value, performanceMode: fs.PerformanceMode, throughputMode: fs.ThroughputMode }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} EFS failed:`, err.message); }
+
+      // Security - Secrets Manager
+      try {
+        const { SecretsManagerClient, ListSecretsCommand } = require('@aws-sdk/client-secrets-manager');
+        const sm = new SecretsManagerClient(config);
+        const smRes = await sm.send(new ListSecretsCommand({ MaxResults: 100 }));
+        for (const secret of (smRes.SecretList || [])) {
+          resources.push({
+            id: secret.ARN, provider: 'aws', type: 'AWS::SecretsManager::Secret',
+            name: secret.Name, region, status: secret.DeletedDate ? 'Deleted' : 'Active',
+            resourceGroup: 'Security', tags: this._tagsToMap(secret.Tags),
+            properties: { lastChangedDate: secret.LastChangedDate, lastRotatedDate: secret.LastRotatedDate, rotationEnabled: secret.RotationEnabled }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} Secrets Manager failed:`, err.message); }
+
+      // Security - WAF Web ACLs
+      try {
+        const { WAFV2Client, ListWebACLsCommand } = require('@aws-sdk/client-wafv2');
+        const waf = new WAFV2Client(config);
+        const wafRes = await waf.send(new ListWebACLsCommand({ Scope: 'REGIONAL', Limit: 100 }));
+        for (const acl of (wafRes.WebACLs || [])) {
+          resources.push({
+            id: acl.ARN, provider: 'aws', type: 'AWS::WAFv2::WebACL',
+            name: acl.Name, region, status: 'Active', resourceGroup: 'Security', tags: {},
+            properties: { lockToken: acl.LockToken }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} WAF failed:`, err.message); }
+
+      // Monitoring - CloudWatch Log Groups
+      try {
+        const { CloudWatchLogsClient, DescribeLogGroupsCommand } = require('@aws-sdk/client-cloudwatch-logs');
+        const cwl = new CloudWatchLogsClient(config);
+        const logRes = await cwl.send(new DescribeLogGroupsCommand({ limit: 50 }));
+        for (const lg of (logRes.logGroups || [])) {
+          resources.push({
+            id: lg.arn || lg.logGroupName, provider: 'aws', type: 'AWS::Logs::LogGroup',
+            name: lg.logGroupName, region, status: 'Active', resourceGroup: 'Monitoring', tags: {},
+            properties: { storedBytes: lg.storedBytes, retentionInDays: lg.retentionInDays, creationTime: lg.creationTime }
+          });
+        }
+      } catch (err) { console.warn(`[AWS] ${region} CloudWatch Logs failed:`, err.message); }
+
     } // end regional loop
 
     return resources;
