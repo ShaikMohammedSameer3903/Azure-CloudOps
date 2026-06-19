@@ -14,6 +14,11 @@ async function updateSyncStatus(accountId, update) {
   const db = await getDatabase();
   const { status, phase, progressCurrent, progressTotal, lastError, provider, userId } = update;
 
+  const isPg = db.type === 'postgres';
+  const durationSql = isPg
+    ? `CAST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - discovery_status.started_at)) * 1000 AS INTEGER)`
+    : `CAST((julianday(CURRENT_TIMESTAMP) - julianday(discovery_status.started_at)) * 86400000 AS INTEGER)`;
+
   await db.run(`
     INSERT INTO discovery_status (account_id, provider, user_id, status, phase, progress_current, progress_total, last_error, started_at, completed_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 
@@ -30,7 +35,7 @@ async function updateSyncStatus(accountId, update) {
       completed_at = CASE WHEN ? IN ('completed', 'error') THEN CURRENT_TIMESTAMP ELSE discovery_status.completed_at END,
       last_sync_duration_ms = CASE 
         WHEN ? IN ('completed', 'error') AND discovery_status.started_at IS NOT NULL 
-        THEN CAST((julianday(CURRENT_TIMESTAMP) - julianday(discovery_status.started_at)) * 86400000 AS INTEGER)
+        THEN ${durationSql}
         ELSE discovery_status.last_sync_duration_ms 
       END
   `, [

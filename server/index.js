@@ -641,17 +641,16 @@ async function startServer() {
     const initialPort = Number(PORT);
     console.log(`[SERVER] Selected port: ${initialPort}`);
 
-    // ── Environment Variable Validation ──
-    const { validateAuthConfig } = require('./services/authConfigValidator');
-    validateAuthConfig();
-    console.log('[SERVER] OAuth initialized...');
-
     // Initialize Secrets Manager first
     await secretsManager.initialize();
 
     // Initialize database connection and schemas
     await getDatabase();
     console.log('[SERVER] Database initialized...');
+
+    // Run Startup Diagnostic Validation
+    const { validateStartup } = require('./services/startupValidator');
+    await validateStartup();
 
     // Run V12 schema migration (idempotent)
     try {
@@ -685,15 +684,19 @@ async function startServer() {
       function tryListen() {
         serverInstance.once('error', (err) => {
           if (err.code === 'EADDRINUSE') {
-            console.error(`\n[SERVER] ERROR: Port ${currentPort} is already in use (EADDRINUSE).`);
+            console.error(`\n🔴 [SERVER] ERROR: Port ${currentPort} is already in use (EADDRINUSE).`);
+            console.error('   A background process is already bound to this port.');
+            console.error('   To kill the dangling process on Windows (PowerShell):');
+            console.error(`     Stop-Process -Id (Get-NetTCPConnection -LocalPort ${currentPort}).OwningProcess -Force`);
+            console.error('   To kill the dangling process on Linux/macOS:');
+            console.error(`     kill -9 $(lsof -t -i:${currentPort})`);
             
             const isProduction = process.env.NODE_ENV === 'production';
             if (isProduction) {
-              console.error(`[SERVER] Critical: Under production mode, we cannot bind to occupied port ${currentPort}.`);
-              console.error('[SERVER] Remediation: Please terminate any processes running on this port or select another port.\n');
+              console.error(`\n[SERVER] Critical: Under production mode, we cannot bind to occupied port ${currentPort}. Exiting.`);
               process.exit(1);
             } else {
-              console.warn(`[SERVER] Warning: Port ${currentPort} is occupied in development. Attempting fallback to port ${currentPort + 1}...`);
+              console.warn(`\n[SERVER] Warning: Port ${currentPort} is occupied in development. Attempting fallback to port ${currentPort + 1}...`);
               currentPort++;
               serverInstance.removeAllListeners('listening');
               tryListen();

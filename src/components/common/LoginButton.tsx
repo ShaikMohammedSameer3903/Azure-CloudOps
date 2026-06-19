@@ -96,6 +96,22 @@ export const LoginButton: React.FC<LoginButtonProps> = ({
   }
 
   if (!isConfigured) {
+    let errorText = `${provider === 'microsoft' ? 'Microsoft' : (provider === 'aws' ? 'AWS' : 'Google')} Sign-In Not Configured`;
+    
+    if (provider === 'google') {
+      const gConfig = providersConfig?.google;
+      if (gConfig?.missing && gConfig.missing.length > 0) {
+        errorText = `Missing ${gConfig.missing.join(', ')} on backend`;
+      } else if (gConfig?.error) {
+        errorText = gConfig.error;
+      }
+    } else if (provider === 'microsoft') {
+      const mConfig = providersConfig?.microsoft;
+      if (mConfig?.error) {
+        errorText = mConfig.error;
+      }
+    }
+
     return (
       <div style={{
         padding: '12px 16px',
@@ -112,7 +128,7 @@ export const LoginButton: React.FC<LoginButtonProps> = ({
         ...style
       }}>
         <AlertCircle size={14} />
-        <span>{provider === 'microsoft' ? 'Microsoft' : (provider === 'aws' ? 'AWS' : 'Google')} Sign-In Not Configured</span>
+        <span>{errorText}</span>
       </div>
     );
   }

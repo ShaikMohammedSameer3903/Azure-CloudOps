@@ -134,10 +134,10 @@ router.get('/providers', async (req, res) => {
     process.env.AZURE_CLIENT_ID !== ''
   );
 
-  const isGoogleConfigured = !!(
-    (process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID) &&
-    process.env.GOOGLE_CLIENT_SECRET
-  );
+  const googleMissing = [];
+  if (!process.env.GOOGLE_CLIENT_ID) googleMissing.push('GOOGLE_CLIENT_ID');
+  if (!process.env.GOOGLE_CLIENT_SECRET) googleMissing.push('GOOGLE_CLIENT_SECRET');
+  const isGoogleConfigured = googleMissing.length === 0;
 
   const isLocalConfigured = !!(
     process.env.LOCAL_ADMIN_EMAIL &&
@@ -156,8 +156,9 @@ router.get('/providers', async (req, res) => {
     azure: msalConfigData,
     google: {
       configured: isGoogleConfigured,
-      clientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || null,
-      error: isGoogleConfigured ? null : 'Google authentication is disabled because GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing.'
+      clientId: process.env.GOOGLE_CLIENT_ID || null,
+      missing: googleMissing,
+      error: isGoogleConfigured ? null : `Google OAuth is disabled because configuration variables are missing: ${googleMissing.join(', ')}`
     },
     aws: {
       configured: true

@@ -18,6 +18,7 @@ export interface ProviderInfo {
   clientId: string | null;
   tenantId?: string;
   error: string | null;
+  missing?: string[];
 }
 
 export interface ProvidersConfig {

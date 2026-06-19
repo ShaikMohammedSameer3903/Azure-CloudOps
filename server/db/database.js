@@ -15,6 +15,7 @@ const { open } = require('sqlite');
 class AsyncSQLiteDB {
   constructor(db) {
     this._db = db;
+    this.type = 'sqlite';
   }
 
   async run(sql, params = []) {
@@ -65,6 +66,7 @@ const { Pool } = require('pg');
 class AsyncPgDB {
   constructor(connectionString) {
     this.pool = new Pool({ connectionString });
+    this.type = 'postgres';
   }
 
   // Helper to convert SQLite `?` params to PostgreSQL `$1, $2` params
@@ -119,6 +121,11 @@ async function getDatabase() {
     await db.exec(schemaSql);
   } else {
     console.log('[DB] Connecting to SQLite (Fallback)...');
+    console.warn('\n=========================================');
+    console.warn('WARNING:');
+    console.warn('Production is running on ephemeral SQLite.');
+    console.warn('Data will not persist.');
+    console.warn('=========================================\n');
     const dbPath = process.env.DATABASE_PATH || path.resolve(__dirname, '../cloudops.db');
     const dbDir = path.dirname(dbPath);
 

@@ -9,15 +9,17 @@ async function runV12Migration() {
   const db = await getDatabase();
   console.log('[MIGRATION] Running V12 schema migration...');
 
+  const isPg = db.type === 'postgres';
+
   const migrations = [
     // ── Resources table expansions ──
     { table: 'resources', column: 'organization_id', type: 'TEXT' },
     { table: 'resources', column: 'account_id', type: 'TEXT' },
     { table: 'resources', column: 'cloud_account_id', type: 'TEXT' },
     { table: 'resources', column: 'region', type: 'TEXT' },
-    { table: 'resources', column: 'created_at', type: 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
-    { table: 'resources', column: 'updated_at', type: 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
-    { table: 'resources', column: 'last_sync', type: 'DATETIME' },
+    { table: 'resources', column: 'created_at', type: isPg ? 'TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP' : 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
+    { table: 'resources', column: 'updated_at', type: isPg ? 'TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP' : 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
+    { table: 'resources', column: 'last_sync', type: isPg ? 'TIMESTAMP WITH TIME ZONE' : 'DATETIME' },
 
     // ── Cloud accounts expansions ──
     { table: 'cloud_accounts', column: 'organization_id', type: 'TEXT' },
@@ -32,7 +34,7 @@ async function runV12Migration() {
       await db.run(`ALTER TABLE ${m.table} ADD COLUMN ${m.column} ${m.type}`);
       console.log(`[MIGRATION] Added ${m.table}.${m.column}`);
     } catch (err) {
-      if (err.message.includes('duplicate column name') || err.message.includes('already exists')) {
+      if (err.message.includes('duplicate column name') || err.message.includes('already exists') || err.message.includes('duplicate')) {
         // Column already exists — skip silently
       } else {
         console.warn(`[MIGRATION] Warning adding ${m.table}.${m.column}: ${err.message}`);
@@ -41,68 +43,133 @@ async function runV12Migration() {
   }
 
   // ── Sync History Table ──
-  await db.run(`
-    CREATE TABLE IF NOT EXISTS sync_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_id TEXT NOT NULL,
-      provider TEXT NOT NULL,
-      user_id TEXT,
-      tenant_id TEXT,
-      status TEXT NOT NULL DEFAULT 'running',
-      phase TEXT DEFAULT 'discovery',
-      resources_found INTEGER DEFAULT 0,
-      resources_updated INTEGER DEFAULT 0,
-      resources_deleted INTEGER DEFAULT 0,
-      errors TEXT,
-      started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      completed_at DATETIME,
-      duration_ms INTEGER DEFAULT 0
-    )
-  `);
+  if (isPg) {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS sync_history (
+        id SERIAL PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        user_id TEXT,
+        tenant_id TEXT,
+        status TEXT NOT NULL DEFAULT 'running',
+        phase TEXT DEFAULT 'discovery',
+        resources_found INTEGER DEFAULT 0,
+        resources_updated INTEGER DEFAULT 0,
+        resources_deleted INTEGER DEFAULT 0,
+        errors TEXT,
+        started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        completed_at TIMESTAMP WITH TIME ZONE,
+        duration_ms INTEGER DEFAULT 0
+      )
+    `);
+  } else {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS sync_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        user_id TEXT,
+        tenant_id TEXT,
+        status TEXT NOT NULL DEFAULT 'running',
+        phase TEXT DEFAULT 'discovery',
+        resources_found INTEGER DEFAULT 0,
+        resources_updated INTEGER DEFAULT 0,
+        resources_deleted INTEGER DEFAULT 0,
+        errors TEXT,
+        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completed_at DATETIME,
+        duration_ms INTEGER DEFAULT 0
+      )
+    `);
+  }
   console.log('[MIGRATION] Created sync_history table');
 
   // ── Discovery Status Table (live state per account) ──
-  await db.run(`
-    CREATE TABLE IF NOT EXISTS discovery_status (
-      account_id TEXT PRIMARY KEY,
-      provider TEXT NOT NULL,
-      user_id TEXT,
-      status TEXT NOT NULL DEFAULT 'idle',
-      phase TEXT DEFAULT 'idle',
-      progress_current INTEGER DEFAULT 0,
-      progress_total INTEGER DEFAULT 0,
-      last_error TEXT,
-      started_at DATETIME,
-      completed_at DATETIME,
-      last_sync_duration_ms INTEGER DEFAULT 0
-    )
-  `);
+  if (isPg) {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS discovery_status (
+        account_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        user_id TEXT,
+        status TEXT NOT NULL DEFAULT 'idle',
+        phase TEXT DEFAULT 'idle',
+        progress_current INTEGER DEFAULT 0,
+        progress_total INTEGER DEFAULT 0,
+        last_error TEXT,
+        started_at TIMESTAMP WITH TIME ZONE,
+        completed_at TIMESTAMP WITH TIME ZONE,
+        last_sync_duration_ms INTEGER DEFAULT 0
+      )
+    `);
+  } else {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS discovery_status (
+        account_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        user_id TEXT,
+        status TEXT NOT NULL DEFAULT 'idle',
+        phase TEXT DEFAULT 'idle',
+        progress_current INTEGER DEFAULT 0,
+        progress_total INTEGER DEFAULT 0,
+        last_error TEXT,
+        started_at DATETIME,
+        completed_at DATETIME,
+        last_sync_duration_ms INTEGER DEFAULT 0
+      )
+    `);
+  }
   console.log('[MIGRATION] Created discovery_status table');
 
   // ── Cost Cache Table ──
-  await db.run(`
-    CREATE TABLE IF NOT EXISTS cost_cache (
-      id TEXT PRIMARY KEY,
-      account_id TEXT NOT NULL,
-      provider TEXT NOT NULL,
-      user_id TEXT,
-      tenant_id TEXT,
-      period TEXT NOT NULL,
-      current_month_cost REAL DEFAULT 0,
-      forecast_cost REAL DEFAULT 0,
-      currency TEXT DEFAULT 'USD',
-      breakdown TEXT,
-      daily_breakdown TEXT,
-      region_breakdown TEXT,
-      top_resources TEXT,
-      idle_resources TEXT,
-      optimization_recommendations TEXT,
-      budgets TEXT,
-      anomalies TEXT,
-      fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expires_at DATETIME
-    )
-  `);
+  if (isPg) {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS cost_cache (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        user_id TEXT,
+        tenant_id TEXT,
+        period TEXT NOT NULL,
+        current_month_cost NUMERIC DEFAULT 0,
+        forecast_cost NUMERIC DEFAULT 0,
+        currency TEXT DEFAULT 'USD',
+        breakdown TEXT,
+        daily_breakdown TEXT,
+        region_breakdown TEXT,
+        top_resources TEXT,
+        idle_resources TEXT,
+        optimization_recommendations TEXT,
+        budgets TEXT,
+        anomalies TEXT,
+        fetched_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        expires_at TIMESTAMP WITH TIME ZONE
+      )
+    `);
+  } else {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS cost_cache (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        user_id TEXT,
+        tenant_id TEXT,
+        period TEXT NOT NULL,
+        current_month_cost REAL DEFAULT 0,
+        forecast_cost REAL DEFAULT 0,
+        currency TEXT DEFAULT 'USD',
+        breakdown TEXT,
+        daily_breakdown TEXT,
+        region_breakdown TEXT,
+        top_resources TEXT,
+        idle_resources TEXT,
+        optimization_recommendations TEXT,
+        budgets TEXT,
+        anomalies TEXT,
+        fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME
+      )
+    `);
+  }
   console.log('[MIGRATION] Created cost_cache table');
 
   // ── Performance Indexes ──

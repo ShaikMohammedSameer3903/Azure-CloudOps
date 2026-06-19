@@ -48,7 +48,11 @@ router.get('/', async (req, res) => {
     }
     const { provider } = req.query;
     if (provider) {
-      query += ` AND r.provider COLLATE NOCASE = ?`;
+      if (db.type === 'postgres') {
+        query += ` AND LOWER(r.provider) = LOWER(?)`;
+      } else {
+        query += ` AND r.provider COLLATE NOCASE = ?`;
+      }
       params.push(provider);
     }
     if (resourceGroup) {
