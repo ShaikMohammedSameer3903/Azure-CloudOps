@@ -144,13 +144,16 @@ router.get('/providers', async (req, res) => {
     process.env.LOCAL_ADMIN_PASSWORD_HASH
   );
 
+  const msalConfigData = {
+    configured: isMicrosoftConfigured,
+    clientId: process.env.AZURE_CLIENT_ID || process.env.VITE_ENTRA_CLIENT_ID || process.env.VITE_AZURE_CLIENT_ID || null,
+    tenantId: process.env.AZURE_TENANT_ID || process.env.VITE_ENTRA_TENANT_ID || process.env.VITE_AZURE_TENANT_ID || 'common',
+    error: isMicrosoftConfigured ? null : 'Microsoft authentication is disabled because AZURE_CLIENT_ID or AZURE_TENANT_ID is missing.'
+  };
+
   res.json({
-    microsoft: {
-      configured: isMicrosoftConfigured,
-      clientId: process.env.AZURE_CLIENT_ID || process.env.VITE_ENTRA_CLIENT_ID || process.env.VITE_AZURE_CLIENT_ID || null,
-      tenantId: process.env.AZURE_TENANT_ID || process.env.VITE_ENTRA_TENANT_ID || process.env.VITE_AZURE_TENANT_ID || 'common',
-      error: isMicrosoftConfigured ? null : 'Microsoft authentication is disabled because AZURE_CLIENT_ID or AZURE_TENANT_ID is missing.'
-    },
+    microsoft: msalConfigData,
+    azure: msalConfigData,
     google: {
       configured: isGoogleConfigured,
       clientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || null,
@@ -342,7 +345,18 @@ router.post('/entra-login', authRateLimiter, async (req, res) => {
   } catch (err) {
     console.error('[AUTH ERROR] Entra ID login failed:', err);
     await logAdminAudit(normalizedEmail, `Microsoft Login Failure: ${err.message}`, ip, userAgent);
-    res.status(401).json({ error: 'Invalid token or login verification failed' });
+
+    // Return specific error codes based on failure type
+    if (err.message && (err.message.includes('token') || err.message.includes('Token') || err.message.includes('jwt'))) {
+      return res.status(401).json({ error: `Microsoft token validation failed: ${err.message}`, code: 'ENTRA_TOKEN_INVALID' });
+    }
+    if (err.message && (err.message.includes('database') || err.message.includes('SQLITE') || err.message.includes('SQL'))) {
+      return res.status(500).json({ error: 'Database error during Microsoft login.', code: 'DATABASE_ERROR', details: err.message });
+    }
+    if (err.message && err.message.includes('redirect')) {
+      return res.status(403).json({ error: `Azure App Registration missing redirect URI: ${err.message}`, code: 'ENTRA_REDIRECT_MISSING' });
+    }
+    res.status(401).json({ error: err.message || 'Microsoft Entra login verification failed.', code: 'ENTRA_LOGIN_FAILED' });
   }
 });
 
@@ -519,7 +533,18 @@ router.post('/google-login', authRateLimiter, async (req, res) => {
   } catch (err) {
     console.error('[AUTH ERROR] Google login failed:', err);
     await logAdminAudit(normalizedEmail, `Google Login Failure: ${err.message}`, ip, userAgent);
-    res.status(401).json({ error: 'Invalid token or login verification failed' });
+
+    // Return specific error codes based on failure type
+    if (err.message && (err.message.includes('token') || err.message.includes('Token'))) {
+      return res.status(401).json({ error: `Google token validation failed: ${err.message}`, code: 'GOOGLE_TOKEN_INVALID' });
+    }
+    if (err.message && err.message.includes('OAuth')) {
+      return res.status(403).json({ error: `Invalid Google OAuth configuration: ${err.message}`, code: 'GOOGLE_OAUTH_INVALID' });
+    }
+    if (err.message && (err.message.includes('database') || err.message.includes('SQLITE') || err.message.includes('SQL'))) {
+      return res.status(500).json({ error: 'Database error during Google login.', code: 'DATABASE_ERROR', details: err.message });
+    }
+    res.status(401).json({ error: err.message || 'Google login verification failed.', code: 'GOOGLE_LOGIN_FAILED' });
   }
 });
 
@@ -699,7 +724,8 @@ router.get('/users', validateJwt, adminOnly, async (req, res) => {
 });
 
 router.post('/users/add', validateJwt, adminOnly, async (req, res) => {
-  const { email, displayName, role, tenantId, provider } = req.body;
+  const { email, displayName, role, provider } = req.body;
+  const tenantId = req.tenantId; // Securely scope to requester's tenant context
   const db = await getDatabase();
   try {
     const normalizedEmail = email.toLowerCase();
@@ -708,7 +734,7 @@ router.post('/users/add', validateJwt, adminOnly, async (req, res) => {
     await db.run(`
       INSERT INTO users (id, email, display_name, role, tenant_id, provider, status)
       VALUES (?, ?, ?, ?, ?, ?, 'Approved')
-    `, [userId, normalizedEmail, displayName, role, tenantId || 'demo-org-001', provider || 'Local']);
+    `, [userId, normalizedEmail, displayName, role, tenantId, provider || 'Local']);
     
     res.json({ success: true });
   } catch (err) {
@@ -721,13 +747,13 @@ router.post('/users/approve', validateJwt, adminOnly, async (req, res) => {
   const { userId } = req.body;
   const db = await getDatabase();
   try {
-    const user = await db.get('SELECT email, role FROM users WHERE id = ?', [userId]);
+    const user = await db.get('SELECT email, role FROM users WHERE id = ? AND tenant_id = ?', [userId, req.tenantId]);
     if (user) {
-      await db.run("UPDATE users SET status = 'Approved' WHERE id = ?", [userId]);
+      await db.run("UPDATE users SET status = 'Approved' WHERE id = ? AND tenant_id = ?", [userId, req.tenantId]);
       await logAudit(req.tenantId, req.userId, req.userEmail, 'USER_APPROVED', 'User', userId, req.ip, 'SUCCESS', { approvedEmail: user.email });
       res.json({ success: true });
     } else {
-      res.status(404).json({ error: 'User not found' });
+      res.status(404).json({ error: 'User not found or access denied.' });
     }
   } catch (err) {
     console.error('[AUTH] User approve failed:', err.message);
@@ -739,7 +765,11 @@ router.post('/users/deactivate', validateJwt, adminOnly, async (req, res) => {
   const { userId } = req.body;
   const db = await getDatabase();
   try {
-    await db.run("UPDATE users SET status = 'Disabled' WHERE id = ?", [userId]);
+    const targetUser = await db.get('SELECT id FROM users WHERE id = ? AND tenant_id = ?', [userId, req.tenantId]);
+    if (!targetUser) {
+      return res.status(404).json({ error: 'User not found or access denied.' });
+    }
+    await db.run("UPDATE users SET status = 'Disabled' WHERE id = ? AND tenant_id = ?", [userId, req.tenantId]);
     // Revoke all active sessions for this user
     await db.run('UPDATE sessions SET revoked = 1 WHERE user_id = ?', [userId]);
     await logAudit(req.tenantId, req.userId, req.userEmail, 'USER_DEACTIVATED', 'User', userId, req.ip, 'SUCCESS');
@@ -754,14 +784,14 @@ router.post('/users/update-role', validateJwt, adminOnly, async (req, res) => {
   const { userId, role } = req.body;
   const db = await getDatabase();
   try {
-    const user = await db.get('SELECT email, role FROM users WHERE id = ?', [userId]);
+    const user = await db.get('SELECT email, role FROM users WHERE id = ? AND tenant_id = ?', [userId, req.tenantId]);
     if (user) {
       // Prevent non-SuperAdmins from assigning SuperAdmin
       if (role === 'SuperAdmin' && req.userRole !== 'SuperAdmin') {
         return res.status(403).json({ error: 'Access Denied: Only SuperAdmin can assign SuperAdmin role.' });
       }
 
-      await db.run('UPDATE users SET role = ? WHERE id = ?', [role, userId]);
+      await db.run('UPDATE users SET role = ? WHERE id = ? AND tenant_id = ?', [role, userId, req.tenantId]);
       await logAudit(req.tenantId, req.userId, req.userEmail, 'USER_ROLE_UPDATED', 'User', userId, req.ip, 'SUCCESS', { oldRole: user.role, newRole: role });
       res.json({ success: true });
     } else {
@@ -789,7 +819,11 @@ router.post('/users/remove', validateJwt, adminOnly, async (req, res) => {
   const { userId } = req.body;
   const db = await getDatabase();
   try {
-    await db.run('DELETE FROM users WHERE id = ?', [userId]);
+    const targetUser = await db.get('SELECT id FROM users WHERE id = ? AND tenant_id = ?', [userId, req.tenantId]);
+    if (!targetUser) {
+      return res.status(404).json({ error: 'User not found or access denied.' });
+    }
+    await db.run('DELETE FROM users WHERE id = ? AND tenant_id = ?', [userId, req.tenantId]);
     res.json({ success: true });
   } catch (err) {
     console.error('[AUTH] Remove user failed:', err.message);

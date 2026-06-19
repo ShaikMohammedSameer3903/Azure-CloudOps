@@ -74,7 +74,7 @@ export default function DiscoveryPage() {
         addLog(`Syncing resources for Subscription: ${sub.name}...`, 'info');
         
         try {
-          const result = await api.post<any>(`/api/subscriptions/${sub.id}/sync`);
+          const result = await api.post<any>(`/api/subscriptions/${sub.id}/sync?sync=true`);
           totalResources += result.resourceCount || 0;
           addLog(`✅ Synced ${result.resourceCount} resources for ${sub.name}`, 'success');
           syncedCount++;

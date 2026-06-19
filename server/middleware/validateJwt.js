@@ -140,8 +140,8 @@ async function validateJwt(req, res, next) {
         }
 
         const lastActiveTime = new Date(session.last_active + ' UTC').getTime();
-        const oneHourAgo = Date.now() - 1 * 60 * 60 * 1000;
-        if (lastActiveTime < oneHourAgo) {
+        const threeHoursAgo = Date.now() - 3 * 60 * 60 * 1000; // Match JWT expiry of 3 hours
+        if (lastActiveTime < threeHoursAgo) {
           await db.run('UPDATE sessions SET revoked = 1 WHERE session_id = ?', [decoded.sessionId]);
           return res.status(403).json({ error: 'Access Denied: Session expired due to inactivity.', code: 'SESSION_TIMEOUT' });
         }

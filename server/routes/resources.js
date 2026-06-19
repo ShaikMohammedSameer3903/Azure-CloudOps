@@ -9,6 +9,7 @@ const router = express.Router();
 const { getDatabase } = require('../db/database');
 const { listResourceGroupsWithCounts } = require('../services/discoveryEngine');
 const { logAudit } = require('../services/auditLogger');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
 
@@ -31,9 +32,14 @@ router.get('/', async (req, res) => {
       FROM resources r
       LEFT JOIN cloud_accounts c ON r.cloud_account_id = c.id
       LEFT JOIN azure_subscriptions a ON r.subscription_id = a.id
-      WHERE (c.user_id = ? OR a.user_id = ?)`;
+      WHERE (c.tenant_id = ? OR a.tenant_id = ? OR r.tenant_id = ?)`;
 
-    let params = [req.userId, req.userId];
+    let params = [req.tenantId, req.tenantId, req.tenantId];
+
+    if (!ADMIN_ROLES.includes((req.userRole || '').toLowerCase())) {
+      query += ` AND (c.user_id = ? OR a.user_id = ? OR r.user_id = ?)`;
+      params.push(req.userId, req.userId, req.userId);
+    }
 
     if (subscriptionId) {
       // subscriptionId in the query could mean account_id for AWS or subscription_id for Azure
@@ -84,7 +90,8 @@ router.get('/', async (req, res) => {
     res.json(formattedResources);
   } catch (error) {
     console.error('[ROUTES] GET /resources failed:', error);
-    res.status(500).json({ error: 'Failed to retrieve discovered resources.' });
+    const classified = classifyCloudError(error, req.query.provider || 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -100,14 +107,15 @@ router.post('/create', async (req, res) => {
     const resourceId = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup || name}/providers/Microsoft.${type}/${name}`;
     
     await db.run(`
-      INSERT INTO resources (id, subscription_id, user_id, resource_group, name, type, location, status, tags, raw_payload)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', '{}', '{}')
-    `, [resourceId, subscriptionId, req.userId, resourceGroup || name, name, `Microsoft.${type}`, location || 'eastus']);
+      INSERT INTO resources (id, subscription_id, tenant_id, user_id, resource_group, name, type, location, status, tags, raw_payload)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Active', '{}', '{}')
+    `, [resourceId, subscriptionId, req.tenantId, req.userId, resourceGroup || name, name, `Microsoft.${type}`, location || 'eastus']);
 
     await logAudit(req.tenantId, req.userId, req.userEmail, 'CREATE_RESOURCE', `Microsoft.${type}`, resourceId, req.ip, 'SUCCESS', { name });
     res.json({ success: true, resourceId });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -119,17 +127,29 @@ router.post('/delete', async (req, res) => {
   }
   const db = await getDatabase();
   try {
-    const resRow = await db.get('SELECT * FROM resources WHERE id = ? AND user_id = ?', [resourceId, req.userId]);
+    const resRow = await db.get('SELECT * FROM resources WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL)', [resourceId, req.tenantId]);
     if (!resRow) {
-      // Check if it belongs to a subscription owned by user
+      // Check if it belongs to a subscription owned by tenant
       const joinCheck = await db.get(`
+        SELECT r.id FROM resources r
+        LEFT JOIN cloud_accounts c ON r.cloud_account_id = c.id
+        LEFT JOIN azure_subscriptions a ON r.subscription_id = a.id
+        WHERE r.id = ? AND (c.tenant_id = ? OR a.tenant_id = ?)
+      `, [resourceId, req.tenantId, req.tenantId]);
+      if (!joinCheck) {
+        return res.status(404).json({ error: 'Resource not found or access denied' });
+      }
+    }
+
+    if (!ADMIN_ROLES.includes((req.userRole || '').toLowerCase())) {
+      const userCheck = await db.get(`
         SELECT r.id FROM resources r
         LEFT JOIN cloud_accounts c ON r.cloud_account_id = c.id
         LEFT JOIN azure_subscriptions a ON r.subscription_id = a.id
         WHERE r.id = ? AND (c.user_id = ? OR a.user_id = ? OR r.user_id = ?)
       `, [resourceId, req.userId, req.userId, req.userId]);
-      if (!joinCheck) {
-        return res.status(404).json({ error: 'Resource not found or access denied' });
+      if (!userCheck) {
+        return res.status(403).json({ error: 'Access denied: not your resource' });
       }
     }
 
@@ -138,7 +158,8 @@ router.post('/delete', async (req, res) => {
     
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -150,7 +171,8 @@ router.get('/groups/:subscriptionId', async (req, res) => {
     const groups = await listResourceGroupsWithCounts(req.tenantId, subscriptionId, userAccessToken);
     res.json(groups);
   } catch (error) {
-    res.status(500).json({ error: error.message || 'Failed to retrieve resource groups.' });
+    const classified = classifyCloudError(error, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -162,9 +184,14 @@ router.get('/regions', async (req, res) => {
       SELECT c.provider, c.account_id, COALESCE(r.region, r.location) as region, COUNT(r.id) as count
       FROM resources r
       LEFT JOIN cloud_accounts c ON r.cloud_account_id = c.id
-      WHERE c.user_id = ?`;
+      WHERE c.tenant_id = ?`;
       
-    let params = [req.userId];
+    let params = [req.tenantId];
+
+    if (!ADMIN_ROLES.includes((req.userRole || '').toLowerCase())) {
+      query += ` AND c.user_id = ?`;
+      params.push(req.userId);
+    }
     
     query += ` GROUP BY c.provider, c.account_id, COALESCE(r.region, r.location) ORDER BY count DESC`;
     
@@ -172,7 +199,8 @@ router.get('/regions', async (req, res) => {
     res.json(regions);
   } catch (error) {
     console.error('[ROUTES] GET /resources/regions failed:', error);
-    res.status(500).json({ error: 'Failed to retrieve regions.' });
+    const classified = classifyCloudError(error, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

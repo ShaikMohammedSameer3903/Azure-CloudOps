@@ -11,16 +11,13 @@ class CloudTrailService {
       const startTime = new Date();
       startTime.setHours(startTime.getHours() - hours);
       
-      // const command = new LookupEventsCommand({
-      //   StartTime: startTime,
-      //   EndTime: new Date(),
-      //   MaxResults: 50
-      // });
-      // const response = await this.client.send(command);
-      // return this._parseEvents(response.Events);
-      // Always return empty array if AWS credentials are not fully set up or it fails.
-      // Do NOT simulate events, as it leaks fake data to all tenants.
-      return [];
+      const command = new LookupEventsCommand({
+        StartTime: startTime,
+        EndTime: new Date(),
+        MaxResults: 50
+      });
+      const response = await this.client.send(command);
+      return this._parseEvents(response.Events || []);
     } catch (error) {
       logger.error('[CloudTrailService] Error fetching CloudTrail events:', error);
       return [];
@@ -39,9 +36,7 @@ class CloudTrailService {
     }));
   }
 
-  _simulateEvents() {
-    return [];
-  }
+
 }
 
 module.exports = new CloudTrailService();

@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db/database');
 const { getAzureClients, isDemoCredential } = require('../services/azureCredentialManager');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 const { verifySubscriptionAccess, logSecurityEvent } = require('../middleware/subscriptionSecurity');
 
@@ -53,8 +54,8 @@ router.get('/', async (req, res) => {
       nonCompliantResources: totalResources - tagged
     });
   } catch (err) {
-    console.error('[ROUTES] GET /governance failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -182,8 +183,8 @@ router.get('/compliance', async (req, res) => {
       policies: basePolicies,
     });
   } catch (err) {
-    console.error('[ROUTES] GET /governance/compliance failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, sub ? sub.provider : 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -209,8 +210,8 @@ router.get('/locks', async (req, res) => {
 
     res.json({ locks, totalLocks: locks.length });
   } catch (err) {
-    console.error('[ROUTES] GET /governance/locks failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 

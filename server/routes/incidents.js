@@ -6,6 +6,7 @@ const express = require('express');
 const router = express.Router();
 const { authorizeRoles } = require('../middleware/rbac');
 const { getIncidents, acknowledgeIncident, resolveIncident } = require('../services/incidentService');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 // 1. GET /api/incidents - List all incidents for the tenant
 router.get('/', async (req, res) => {
@@ -15,8 +16,8 @@ router.get('/', async (req, res) => {
     const list = await getIncidents(req.tenantId, req.userId, req.userRole, status, provider);
     res.json(list);
   } catch (error) {
-    console.error('[ROUTES] GET /incidents failed:', error);
-    res.status(500).json({ error: 'Failed to retrieve incidents.' });
+    const classified = classifyCloudError(error, provider || 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -29,8 +30,8 @@ router.post('/:id/acknowledge', authorizeRoles('OWNER', 'ADMIN', 'OPERATOR'), as
     const result = await acknowledgeIncident(req.tenantId, id, req.userEmail, req.userId);
     res.json(result);
   } catch (error) {
-    console.error(`[ROUTES] Incident acknowledge failed for ${id}:`, error);
-    res.status(500).json({ error: error.message });
+    const classified = classifyCloudError(error, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -43,8 +44,8 @@ router.post('/:id/resolve', authorizeRoles('OWNER', 'ADMIN', 'OPERATOR'), async 
     const result = await resolveIncident(req.tenantId, id, req.userEmail, req.userId);
     res.json(result);
   } catch (error) {
-    console.error(`[ROUTES] Incident resolution failed for ${id}:`, error);
-    res.status(500).json({ error: error.message });
+    const classified = classifyCloudError(error, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

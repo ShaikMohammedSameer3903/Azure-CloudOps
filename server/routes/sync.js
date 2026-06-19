@@ -9,11 +9,12 @@ const express = require('express');
 const router = express.Router();
 const { getSyncStatusForUser, getSyncHistoryForUser, getSyncHistory } = require('../services/syncStatusService');
 const { discoverCloudAccount } = require('../services/discoveryEngine');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 // GET /api/sync/status
 router.get('/status', async (req, res) => {
   try {
-    const statuses = await getSyncStatusForUser(req.userId);
+    const statuses = await getSyncStatusForUser(req.tenantId, req.userId, req.userRole);
     res.json({
       accounts: statuses,
       summary: {
@@ -25,7 +26,8 @@ router.get('/status', async (req, res) => {
       }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -33,10 +35,11 @@ router.get('/status', async (req, res) => {
 router.get('/history', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
-    const history = await getSyncHistoryForUser(req.userId, limit);
+    const history = await getSyncHistoryForUser(req.tenantId, req.userId, req.userRole, limit);
     res.json(history);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -47,7 +50,8 @@ router.get('/:accountId/history', async (req, res) => {
     const history = await getSyncHistory(req.params.accountId, limit);
     res.json(history);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -63,7 +67,8 @@ router.post('/:accountId/retry', async (req, res) => {
 
     res.json({ success: true, message: 'Sync retry started asynchronously.' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

@@ -79,17 +79,28 @@ async function recordSyncHistory(accountId, result) {
 }
 
 /**
- * Get current sync status for all accounts belonging to a user.
+ * Get current sync status for all accounts belonging to a user/tenant.
  */
-async function getSyncStatusForUser(userId) {
+async function getSyncStatusForUser(tenantId, userId, userRole) {
   const db = await getDatabase();
-  const statuses = await db.all(`
+  const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+  const isAdmin = ADMIN_ROLES.includes((userRole || '').toLowerCase());
+
+  let query = `
     SELECT ds.*, ca.account_name, ca.provider as account_provider
     FROM discovery_status ds
     LEFT JOIN cloud_accounts ca ON ds.account_id = ca.id
-    WHERE ds.user_id = ? OR ca.user_id = ?
-    ORDER BY ds.started_at DESC
-  `, [userId, userId]);
+    WHERE (ca.tenant_id = ? OR ds.user_id IN (SELECT id FROM users WHERE tenant_id = ?))
+  `;
+  const params = [tenantId, tenantId];
+
+  if (!isAdmin) {
+    query += ` AND (ds.user_id = ? OR ca.user_id = ?)`;
+    params.push(userId, userId);
+  }
+
+  query += ` ORDER BY ds.started_at DESC`;
+  const statuses = await db.all(query, params);
   return statuses;
 }
 
@@ -107,18 +118,30 @@ async function getSyncHistory(accountId, limit = 20) {
 }
 
 /**
- * Get sync history for all accounts of a user.
+ * Get sync history for all accounts of a user/tenant.
  */
-async function getSyncHistoryForUser(userId, limit = 50) {
+async function getSyncHistoryForUser(tenantId, userId, userRole, limit = 50) {
   const db = await getDatabase();
-  return db.all(`
+  const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+  const isAdmin = ADMIN_ROLES.includes((userRole || '').toLowerCase());
+
+  let query = `
     SELECT sh.*, ca.account_name
     FROM sync_history sh
     LEFT JOIN cloud_accounts ca ON sh.account_id = ca.id
-    WHERE sh.user_id = ? OR ca.user_id = ?
-    ORDER BY sh.completed_at DESC
-    LIMIT ?
-  `, [userId, userId, limit]);
+    WHERE (sh.tenant_id = ? OR ca.tenant_id = ?)
+  `;
+  const params = [tenantId, tenantId];
+
+  if (!isAdmin) {
+    query += ` AND (sh.user_id = ? OR ca.user_id = ?)`;
+    params.push(userId, userId);
+  }
+
+  query += ` ORDER BY sh.completed_at DESC LIMIT ?`;
+  params.push(limit);
+
+  return db.all(query, params);
 }
 
 module.exports = {

@@ -7,9 +7,11 @@ const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db/database');
 const ProviderFactory = require('../providers/ProviderFactory');
+const { classifyCloudError } = require('../middleware/errorClassifier');
+const adminOnly = require('../middleware/adminOnly');
 
 // POST /api/onboarding/test-connection
-router.post('/test-connection', async (req, res) => {
+router.post('/test-connection', adminOnly, async (req, res) => {
   const { provider, credentials } = req.body;
   
   if (!provider || !credentials) {
@@ -33,8 +35,8 @@ router.post('/test-connection', async (req, res) => {
       const data = await cloudProvider.getSecurity();
       if (data) success = true;
     } else if (provider.toLowerCase() === 'azure') {
-       // Mock for azure onboarding test since AzureProvider relies on specific auth setup in this project
-       success = true; 
+      const data = await cloudProvider.getResources();
+      if (data) success = true;
     } else if (provider.toLowerCase() === 'gcp') {
       const data = await cloudProvider.getResources();
       if (data) success = true;
@@ -47,14 +49,15 @@ router.post('/test-connection', async (req, res) => {
     }
 
   } catch (error) {
-    console.error('[Onboarding] Test connection failed:', error);
-    res.status(500).json({ error: error.message || 'Failed to establish connection' });
+    const classified = classifyCloudError(error, provider || 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
 // POST /api/onboarding/complete
-router.post('/complete', async (req, res) => {
-  const { tenantId, name, planType } = req.body;
+router.post('/complete', adminOnly, async (req, res) => {
+  const { name, planType } = req.body;
+  const tenantId = req.tenantId; // Secure tenant context lookup
   
   try {
     const db = await getDatabase();
@@ -73,8 +76,8 @@ router.post('/complete', async (req, res) => {
 
     res.json({ success: true, message: 'Onboarding completed successfully.' });
   } catch (error) {
-    console.error('[Onboarding] Completion failed:', error);
-    res.status(500).json({ error: 'Failed to complete onboarding' });
+    const classified = classifyCloudError(error, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

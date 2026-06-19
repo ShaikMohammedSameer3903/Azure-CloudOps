@@ -101,12 +101,27 @@ function normalizeSeverity(sev) {
 
 /**
  * Fetches and normalizes all active threats for a tenant across all connected clouds.
- * Restricts query strictly to the current user's accounts to prevent data leakage.
+ * Restricts query based on user's role to support multi-tenant isolation.
  */
-async function getUnifiedThreats(tenantId, userId) {
+async function getUnifiedThreats(tenantId, userId, userRole) {
   const db = await getDatabase();
-  const cloudAccounts = await db.all('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ?', [tenantId, userId]);
-  const azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [tenantId, userId]);
+  const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+  const isAdmin = ADMIN_ROLES.includes((userRole || '').toLowerCase());
+
+  let cloudAccountsQuery = 'SELECT * FROM cloud_accounts WHERE tenant_id = ?';
+  let cloudAccountsParams = [tenantId];
+  let azureSubsQuery = 'SELECT * FROM azure_subscriptions WHERE tenant_id = ?';
+  let azureSubsParams = [tenantId];
+
+  if (!isAdmin) {
+    cloudAccountsQuery += ' AND user_id = ?';
+    cloudAccountsParams.push(userId);
+    azureSubsQuery += ' AND user_id = ?';
+    azureSubsParams.push(userId);
+  }
+
+  const cloudAccounts = await db.all(cloudAccountsQuery, cloudAccountsParams);
+  const azureSubs = await db.all(azureSubsQuery, azureSubsParams);
   
   let allThreats = [];
 

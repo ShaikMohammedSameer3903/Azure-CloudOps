@@ -7,6 +7,7 @@ const router = express.Router();
 const { getDatabase } = require('../db/database');
 const { getAzureClients } = require('../services/azureCredentialManager');
 const axios = require('axios');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 const { verifySubscriptionAccess } = require('../middleware/subscriptionSecurity');
 
@@ -71,7 +72,8 @@ router.get('/workspaces', async (req, res) => {
     res.json(sentinelWorkspaces);
   } catch (err) {
     console.error('[SENTINEL] GET /workspaces failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -117,7 +119,8 @@ router.get('/incidents', async (req, res) => {
     res.json(incidents);
   } catch (err) {
     console.error('[SENTINEL] GET /incidents failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -159,7 +162,8 @@ router.get('/alerts', async (req, res) => {
     res.json(alerts);
   } catch (err) {
     console.error('[SENTINEL] GET /alerts failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -232,7 +236,8 @@ router.post('/remediate', async (req, res) => {
     res.json({ success: true, message });
   } catch (err) {
     console.error('[SENTINEL] Remediation failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 

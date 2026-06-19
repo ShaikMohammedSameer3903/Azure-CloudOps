@@ -11,6 +11,7 @@ const { authorizeRoles } = require('../middleware/rbac');
 const { discoverAllResources } = require('../services/discoveryEngine');
 const { enqueueJob } = require('../services/jobQueue');
 const { clearClientCache } = require('../services/azureCredentialManager');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 // ── Role helper ─────────────────────────────────────────────
 function isAdminRole(role) {
@@ -26,10 +27,17 @@ router.get('/', async (req, res) => {
     let subs;
     // Strict Multi-Tenant Data Isolation: All subscriptions strictly scoped by user_id
     console.log(`[SECURITY] User subscription list: user=${req.userEmail} (${req.userId}) tenant=***`);
-    subs = await db.all(
-      'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE user_id = ?',
-      [req.userId]
-    );
+    if (isAdminRole(req.userRole)) {
+      subs = await db.all(
+        'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE tenant_id = ?',
+        [req.tenantId]
+      );
+    } else {
+      subs = await db.all(
+        'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE user_id = ?',
+        [req.userId]
+      );
+    }
 
     // If user has an Azure Management token, cross-reference with Azure ARM for real-time state
     const userAzureToken = req.headers['x-azure-token'];
@@ -44,10 +52,18 @@ router.get('/', async (req, res) => {
 
           // Auto-register any Azure subscriptions not yet in DB
           for (const armSub of armSubs) {
-            const exists = await db.get(
-              'SELECT id FROM azure_subscriptions WHERE subscription_id = ? AND user_id = ?',
-              [armSub.subscriptionId, req.userId]
-            );
+            let exists;
+            if (isAdminRole(req.userRole)) {
+              exists = await db.get(
+                'SELECT id FROM azure_subscriptions WHERE subscription_id = ? AND tenant_id = ?',
+                [armSub.subscriptionId, req.tenantId]
+              );
+            } else {
+              exists = await db.get(
+                'SELECT id FROM azure_subscriptions WHERE subscription_id = ? AND user_id = ?',
+                [armSub.subscriptionId, req.userId]
+              );
+            }
               if (!exists) {
                 try {
                   const newId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -82,10 +98,17 @@ router.get('/', async (req, res) => {
               }
             }
             // Re-fetch after auto-register
-            subs = await db.all(
-              'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE user_id = ?',
-              [req.userId]
-            );
+            if (isAdminRole(req.userRole)) {
+              subs = await db.all(
+                'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE tenant_id = ?',
+                [req.tenantId]
+              );
+            } else {
+              subs = await db.all(
+                'SELECT id, subscription_id, name, client_id, azure_tenant_id, auth_type, status, user_id, created_at FROM azure_subscriptions WHERE user_id = ?',
+                [req.userId]
+              );
+            }
 
           // Attach ARM state to existing subs
           subs = subs.map(sub => {
@@ -106,7 +129,8 @@ router.get('/', async (req, res) => {
     res.json(subs);
   } catch (error) {
     console.error('[ROUTES] GET /subscriptions failed:', error);
-    res.status(500).json({ error: 'Failed to retrieve subscriptions.' });
+    const classified = classifyCloudError(error, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -123,10 +147,18 @@ router.post('/', async (req, res) => {
     const db = await getDatabase();
 
     // Check for duplicate under this user (or tenant if admin)
-    const existing = await db.get(
-      'SELECT * FROM azure_subscriptions WHERE subscription_id = ? AND user_id = ?',
-      [subscriptionId, req.userId]
-    );
+    let existing;
+    if (isAdminRole(req.userRole)) {
+      existing = await db.get(
+        'SELECT * FROM azure_subscriptions WHERE subscription_id = ? AND tenant_id = ?',
+        [subscriptionId, req.tenantId]
+      );
+    } else {
+      existing = await db.get(
+        'SELECT * FROM azure_subscriptions WHERE subscription_id = ? AND user_id = ?',
+        [subscriptionId, req.userId]
+      );
+    }
 
     if (existing) {
       return res.json({
@@ -162,7 +194,8 @@ router.post('/', async (req, res) => {
     res.status(201).json(created);
   } catch (error) {
     console.error('[ROUTES] POST /subscriptions failed:', error);
-    res.status(500).json({ error: 'Failed to register subscription.' });
+    const classified = classifyCloudError(error, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -178,16 +211,26 @@ router.post('/:id/sync', async (req, res) => {
   try {
     const db = await getDatabase();
     // Strict Multi-Tenant Data Isolation
-    const sub = await db.get(
-      'SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?',
-      [req.userId, id]
-    );
+    const { verifySubscriptionAccess } = require('../middleware/subscriptionSecurity');
+    const sub = await verifySubscriptionAccess(req.tenantId, req.userId, req.userRole, id);
 
     if (!sub) {
       return res.status(404).json({ error: 'Subscription not found or access denied.' });
     }
 
     console.log(`[SECURITY] Sync queued: sub=${sub.id} by user=${req.userEmail} (${req.userRole})`);
+
+    const runSynchronous = req.query.sync === 'true' || req.body.sync === 'true';
+    if (runSynchronous) {
+      console.log(`[SECURITY] Running synchronous sync: sub=${sub.id} by user=${req.userEmail}`);
+      const resources = await discoverAllResources(sub.tenant_id || req.tenantId, sub.id, userAccessToken);
+      return res.json({
+        success: true,
+        message: 'Sync completed synchronously',
+        resourceCount: resources.length,
+        subscriptionId: sub.subscription_id
+      });
+    }
 
     const opId = await enqueueJob(
       sub.tenant_id || req.tenantId,
@@ -200,7 +243,8 @@ router.post('/:id/sync', async (req, res) => {
     res.json({ success: true, message: 'Discovery job queued in background', operationId: opId, subscriptionId: sub.subscription_id });
   } catch (error) {
     console.error('[ROUTES] POST /subscriptions/:id/sync failed:', error);
-    res.status(500).json({ error: error.message || 'Failed to sync subscription.' });
+    const classified = classifyCloudError(error, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -212,7 +256,8 @@ router.put('/:id', authorizeRoles('OWNER', 'ADMIN', 'SuperAdmin', 'Admin'), asyn
   try {
     const db = await getDatabase();
     // Strict Multi-Tenant Data Isolation
-    const sub = await db.get('SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?', [req.userId, id]);
+    const { verifySubscriptionAccess } = require('../middleware/subscriptionSecurity');
+    const sub = await verifySubscriptionAccess(req.tenantId, req.userId, req.userRole, id);
 
     if (!sub) {
       return res.status(404).json({ error: 'Subscription not found or access denied.' });
@@ -236,7 +281,8 @@ router.put('/:id', authorizeRoles('OWNER', 'ADMIN', 'SuperAdmin', 'Admin'), asyn
     res.json(updated);
   } catch (error) {
     console.error('[ROUTES] PUT /subscriptions/:id failed:', error);
-    res.status(500).json({ error: 'Failed to update subscription.' });
+    const classified = classifyCloudError(error, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -246,7 +292,8 @@ router.delete('/:id', async (req, res) => {
   try {
     const db = await getDatabase();
     // Strict Multi-Tenant Data Isolation
-    const sub = await db.get('SELECT * FROM azure_subscriptions WHERE user_id = ? AND id = ?', [req.userId, id]);
+    const { verifySubscriptionAccess } = require('../middleware/subscriptionSecurity');
+    const sub = await verifySubscriptionAccess(req.tenantId, req.userId, req.userRole, id);
 
     if (!sub) {
       return res.status(404).json({ error: 'Subscription not found or access denied.' });
@@ -261,7 +308,8 @@ router.delete('/:id', async (req, res) => {
     res.json({ success: true, message: 'Subscription and associated resources removed.' });
   } catch (error) {
     console.error('[ROUTES] DELETE /subscriptions/:id failed:', error);
-    res.status(500).json({ error: 'Failed to delete subscription.' });
+    const classified = classifyCloudError(error, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 });
 

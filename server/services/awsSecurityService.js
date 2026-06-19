@@ -4,8 +4,8 @@ const lambdaService = require('./lambdaService');
 const logger = require('winston');
 
 class AwsSecurityService {
-  async getDashboardStats(tenantId, userId) {
-    const events = await this.getAllEvents(tenantId, userId);
+  async getDashboardStats(tenantId, userId, userRole) {
+    const events = await this.getAllEvents(tenantId, userId, userRole);
     const critical = events.filter(e => e.severity === 'CRITICAL').length;
     const high = events.filter(e => e.severity === 'HIGH').length;
     const resolved = events.filter(e => e.status === 'Resolved').length;
@@ -26,16 +26,22 @@ class AwsSecurityService {
     };
   }
 
-  async getAllEvents(tenantId, userId) {
+  async getAllEvents(tenantId, userId, userRole) {
     // 1. Fetch normalized live threats from configured cloud accounts
-    const liveThreats = await getUnifiedThreats(tenantId, userId);
+    const liveThreats = await getUnifiedThreats(tenantId, userId, userRole);
 
     const db = await getDatabase();
+    const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+    const isAdmin = ADMIN_ROLES.includes((userRole || '').toLowerCase());
+
     // 2. Fetch persistent state overrides from local database incidents table
-    const dbOverrides = await db.all(
-      "SELECT id, status FROM incidents WHERE category = 'Security' AND tenant_id = ? AND user_id = ?",
-      [tenantId, userId]
-    );
+    let query = "SELECT id, status FROM incidents WHERE category = 'Security' AND tenant_id = ?";
+    let params = [tenantId];
+    if (!isAdmin) {
+      query += " AND user_id = ?";
+      params.push(userId);
+    }
+    const dbOverrides = await db.all(query, params);
 
     const overrideMap = {};
     dbOverrides.forEach(o => {
@@ -85,8 +91,8 @@ class AwsSecurityService {
     return events;
   }
 
-  async triggerManualRemediation(tenantId, userId, incidentId) {
-    const events = await this.getAllEvents(tenantId, userId);
+  async triggerManualRemediation(tenantId, userId, userRole, incidentId) {
+    const events = await this.getAllEvents(tenantId, userId, userRole);
     const event = events.find(e => e.id === incidentId);
     if (!event) throw new Error('Incident not found or access denied');
 
@@ -110,8 +116,8 @@ class AwsSecurityService {
     return event;
   }
 
-  async acknowledgeEvent(tenantId, userId, incidentId) {
-    const events = await this.getAllEvents(tenantId, userId);
+  async acknowledgeEvent(tenantId, userId, userRole, incidentId) {
+    const events = await this.getAllEvents(tenantId, userId, userRole);
     const event = events.find(e => e.id === incidentId);
     if (!event) throw new Error('Incident not found or access denied');
 

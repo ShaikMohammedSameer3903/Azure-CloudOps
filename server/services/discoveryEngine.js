@@ -4,6 +4,7 @@
 
 const { getDatabase } = require('../db/database');
 const { getAzureClients } = require('./azureCredentialManager');
+const { updateSyncStatus, recordSyncHistory } = require('./syncStatusService');
 
 let schedulerInterval = null;
 
@@ -14,7 +15,7 @@ let schedulerInterval = null;
 function startDiscoveryScheduler() {
   if (schedulerInterval) return;
 
-  console.log('[DISCOVERY-SCHEDULER] Started (30s interval). Credential-based subs only.');
+  console.log('[DISCOVERY-SCHEDULER] Started (10m interval). Credential-based subs only.');
   schedulerInterval = setInterval(async () => {
     try {
       const db = await getDatabase();
@@ -65,7 +66,7 @@ function startDiscoveryScheduler() {
     } catch (err) {
       console.error('[DISCOVERY-SCHEDULER] Fatal error:', err.message);
     }
-  }, 30000);
+  }, 600000); // 10 minutes interval
 }
 
 /**
@@ -79,47 +80,118 @@ async function discoverAwsAccount(accountId) {
     console.warn(`[DISCOVERY] AWS account ${accountId} not found.`);
     return [];
   }
+
+  // Update status to syncing
+  await updateSyncStatus(account.id, {
+    status: 'syncing',
+    phase: 'discovery',
+    progressCurrent: 10,
+    progressTotal: 100,
+    provider: 'aws',
+    userId: account.user_id
+  });
   
   try {
     console.log(`[DISCOVERY] Scanning AWS: "${account.account_name}"`);
     const ProviderFactory = require('../providers/ProviderFactory');
     const providerInstance = ProviderFactory.getProvider(account);
     const resources = await providerInstance.getResources();
+
+    await updateSyncStatus(account.id, {
+      status: 'syncing',
+      phase: 'persisting',
+      progressCurrent: 60,
+      progressTotal: 100,
+      provider: 'aws',
+      userId: account.user_id
+    });
     
-    for (const resource of resources) {
-      await db.run(`
-        INSERT OR REPLACE INTO resources (id, name, type, location, status, provider, tags, resource_group, subscription_id, cloud_account_id, user_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        resource.id, resource.name, resource.type, resource.region || 'global', resource.status,
-        resource.provider, JSON.stringify(resource.tags || {}), resource.resourceGroup || null,
-        account.id, account.id, account.user_id
-      ]);
+    await db.run('BEGIN TRANSACTION');
+    try {
+      for (const resource of resources) {
+        await db.run(`
+          INSERT OR REPLACE INTO resources (id, name, type, location, status, provider, tags, resource_group, subscription_id, cloud_account_id, tenant_id, user_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          resource.id, resource.name, resource.type, resource.region || 'global', resource.status,
+          resource.provider, JSON.stringify(resource.tags || {}), resource.resourceGroup || null,
+          account.id, account.id, account.tenant_id, account.user_id
+        ]);
+      }
+      await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [account.id]);
+      await db.run('COMMIT');
+    } catch (txErr) {
+      await db.run('ROLLBACK');
+      throw txErr;
     }
-    await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [account.id]);
     
     const { broadcastToUser } = require('../websockets/gateway');
     broadcastToUser(account.user_id, 'RESOURCE_DISCOVERED', { accountId: account.account_id, provider: 'aws' });
+
+    const durationMs = Date.now() - startMs;
+
+    // Record success
+    await updateSyncStatus(account.id, {
+      status: 'completed',
+      phase: 'idle',
+      progressCurrent: 100,
+      progressTotal: 100,
+      provider: 'aws',
+      userId: account.user_id
+    });
+
+    await recordSyncHistory(account.id, {
+      provider: 'aws',
+      userId: account.user_id,
+      tenantId: account.tenant_id,
+      status: 'completed',
+      resourcesFound: resources.length,
+      resourcesUpdated: resources.length,
+      resourcesDeleted: 0,
+      durationMs
+    });
 
     await db.run(`
       INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
       VALUES (?, 'system', 'discovery-engine@cloudops.internal', 'DISCOVERY_COMPLETED', 'AWSSubscription', ?, ?)
     `, [account.tenant_id || 'demo-org-001', account.account_id, JSON.stringify({
       count: resources.length,
-      durationMs: Date.now() - startMs
+      durationMs
     })]);
 
     console.log(`[DISCOVERY] Done AWS: "${account.account_name}" → ${resources.length} resources`);
     return resources;
   } catch (awsErr) {
     console.error(`[DISCOVERY] Error scanning AWS "${account.account_name}": ${awsErr.message}`);
+    const durationMs = Date.now() - startMs;
+
+    // Record failure
+    await updateSyncStatus(account.id, {
+      status: 'error',
+      phase: 'error',
+      progressCurrent: 0,
+      progressTotal: 100,
+      lastError: awsErr.message || 'AWS Discovery Failed',
+      provider: 'aws',
+      userId: account.user_id
+    });
+
+    await recordSyncHistory(account.id, {
+      provider: 'aws',
+      userId: account.user_id,
+      tenantId: account.tenant_id,
+      status: 'error',
+      errors: [awsErr.message || 'AWS Discovery Failed'],
+      durationMs
+    });
+
     try {
       await db.run(`
         INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
         VALUES (?, 'system', 'discovery-engine@cloudops.internal', 'DISCOVERY_FAILED', 'AWSSubscription', ?, ?)
       `, [account.tenant_id || 'demo-org-001', account.account_id, JSON.stringify({
         error: awsErr.message || String(awsErr),
-        durationMs: Date.now() - startMs
+        durationMs
       })]);
     } catch (auditErr) {
       console.error('[DISCOVERY] Failed to write AWS failure audit log:', auditErr.message);
@@ -139,47 +211,118 @@ async function discoverGcpAccount(accountId) {
     console.warn(`[DISCOVERY] GCP account ${accountId} not found.`);
     return [];
   }
+
+  // Update status to syncing
+  await updateSyncStatus(account.id, {
+    status: 'syncing',
+    phase: 'discovery',
+    progressCurrent: 10,
+    progressTotal: 100,
+    provider: 'gcp',
+    userId: account.user_id
+  });
   
   try {
     console.log(`[DISCOVERY] Scanning GCP: "${account.account_name}"`);
     const ProviderFactory = require('../providers/ProviderFactory');
     const providerInstance = ProviderFactory.getProvider(account);
     const resources = await providerInstance.getResources();
+
+    await updateSyncStatus(account.id, {
+      status: 'syncing',
+      phase: 'persisting',
+      progressCurrent: 60,
+      progressTotal: 100,
+      provider: 'gcp',
+      userId: account.user_id
+    });
     
-    for (const resource of resources) {
-      await db.run(`
-        INSERT OR REPLACE INTO resources (id, name, type, location, status, provider, tags, resource_group, subscription_id, cloud_account_id, user_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        resource.id, resource.name, resource.type, resource.region || 'global', resource.status,
-        resource.provider, JSON.stringify(resource.tags || {}), resource.resourceGroup || null,
-        account.id, account.id, account.user_id
-      ]);
+    await db.run('BEGIN TRANSACTION');
+    try {
+      for (const resource of resources) {
+        await db.run(`
+          INSERT OR REPLACE INTO resources (id, name, type, location, status, provider, tags, resource_group, subscription_id, cloud_account_id, tenant_id, user_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          resource.id, resource.name, resource.type, resource.region || 'global', resource.status,
+          resource.provider, JSON.stringify(resource.tags || {}), resource.resourceGroup || null,
+          account.id, account.id, account.tenant_id, account.user_id
+        ]);
+      }
+      await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [account.id]);
+      await db.run('COMMIT');
+    } catch (txErr) {
+      await db.run('ROLLBACK');
+      throw txErr;
     }
-    await db.run('UPDATE cloud_accounts SET last_sync = CURRENT_TIMESTAMP WHERE id = ?', [account.id]);
     
     const { broadcastToUser } = require('../websockets/gateway');
     broadcastToUser(account.user_id, 'RESOURCE_DISCOVERED', { accountId: account.account_id, provider: 'gcp' });
+
+    const durationMs = Date.now() - startMs;
+
+    // Record success
+    await updateSyncStatus(account.id, {
+      status: 'completed',
+      phase: 'idle',
+      progressCurrent: 100,
+      progressTotal: 100,
+      provider: 'gcp',
+      userId: account.user_id
+    });
+
+    await recordSyncHistory(account.id, {
+      provider: 'gcp',
+      userId: account.user_id,
+      tenantId: account.tenant_id,
+      status: 'completed',
+      resourcesFound: resources.length,
+      resourcesUpdated: resources.length,
+      resourcesDeleted: 0,
+      durationMs
+    });
 
     await db.run(`
       INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
       VALUES (?, 'system', 'discovery-engine@cloudops.internal', 'DISCOVERY_COMPLETED', 'GCPSubscription', ?, ?)
     `, [account.tenant_id || 'demo-org-001', account.account_id, JSON.stringify({
       count: resources.length,
-      durationMs: Date.now() - startMs
+      durationMs
     })]);
 
     console.log(`[DISCOVERY] Done GCP: "${account.account_name}" → ${resources.length} resources`);
     return resources;
   } catch (gcpErr) {
     console.error(`[DISCOVERY] Error scanning GCP "${account.account_name}": ${gcpErr.message}`);
+    const durationMs = Date.now() - startMs;
+
+    // Record failure
+    await updateSyncStatus(account.id, {
+      status: 'error',
+      phase: 'error',
+      progressCurrent: 0,
+      progressTotal: 100,
+      lastError: gcpErr.message || 'GCP Discovery Failed',
+      provider: 'gcp',
+      userId: account.user_id
+    });
+
+    await recordSyncHistory(account.id, {
+      provider: 'gcp',
+      userId: account.user_id,
+      tenantId: account.tenant_id,
+      status: 'error',
+      errors: [gcpErr.message || 'GCP Discovery Failed'],
+      durationMs
+    });
+
     try {
       await db.run(`
         INSERT INTO audit_logs (tenant_id, user_id, user_email, action, resource_type, resource_id, details)
         VALUES (?, 'system', 'discovery-engine@cloudops.internal', 'DISCOVERY_FAILED', 'GCPSubscription', ?, ?)
       `, [account.tenant_id || 'demo-org-001', account.account_id, JSON.stringify({
         error: gcpErr.message || String(gcpErr),
-        durationMs: Date.now() - startMs
+        durationMs
       })]);
     } catch (auditErr) {
       console.error('[DISCOVERY] Failed to write GCP failure audit log:', auditErr.message);
@@ -257,6 +400,16 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
     [tenantId, subscriptionId, subscriptionId]
   );
   if (!sub) throw new Error(`Subscription not found: tenantId=${tenantId} subId=${subscriptionId}`);
+
+  // Update status to syncing
+  await updateSyncStatus(sub.id, {
+    status: 'syncing',
+    phase: 'discovery',
+    progressCurrent: 10,
+    progressTotal: 100,
+    provider: 'azure',
+    userId: sub.user_id
+  });
 
   console.log(
     `[DISCOVERY] ▶ Starting: "${sub.name}" (${sub.subscription_id}) ` +
@@ -402,11 +555,22 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
     `[DISCOVERY] Dedup: ${resourcesList.length} raw → ${deduplicatedResources.length} unique resources for "${sub.name}"`
   );
 
+  // Update status to syncing (persisting phase)
+  await updateSyncStatus(sub.id, {
+    status: 'syncing',
+    phase: 'persisting',
+    progressCurrent: 60,
+    progressTotal: 100,
+    provider: 'azure',
+    userId: sub.user_id
+  });
+
   // ─── Persist to DB ────────────────────────────────────────────────────────
   const discoveredIds = [];
   const discoveredList = [];
 
   try {
+    await db.run('BEGIN TRANSACTION');
     for (const resource of deduplicatedResources) {
       const resourceId = resource.id;
       const parsedType = resource.type;
@@ -452,10 +616,10 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
 
       await db.run(`
         INSERT INTO resources (
-          id, subscription_id, user_id, resource_group, name, type, location, status, tags, raw_payload,
+          id, subscription_id, tenant_id, user_id, resource_group, name, type, location, status, tags, raw_payload,
           owner, last_modified, cost_impact, risk_score, health_status, last_discovered_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           status = excluded.status,
@@ -468,7 +632,7 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
           health_status = excluded.health_status,
           last_discovered_at = CURRENT_TIMESTAMP
       `, [
-        resourceId, sub.id, sub.user_id, resourceGroup, name, parsedType, location,
+        resourceId, sub.id, tenantId, sub.user_id, resourceGroup, name, parsedType, location,
         status, tags, JSON.stringify(rawPayload), owner, lastModified,
         costImpact, riskScore, healthStatus
       ]);
@@ -508,6 +672,8 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
     } else {
       await db.run('DELETE FROM resources WHERE subscription_id = ?', [sub.id]);
     }
+    
+    await db.run('COMMIT');
 
     // Audit log - rate limit successful discovery logs (max once every 30 minutes per account)
     const thirtyMinutesAgo = new Date(Date.now() - 30 * 60000).toISOString();
@@ -533,6 +699,28 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
     }
 
     const totalMs = Date.now() - startMs;
+
+    // Record success
+    await updateSyncStatus(sub.id, {
+      status: 'completed',
+      phase: 'idle',
+      progressCurrent: 100,
+      progressTotal: 100,
+      provider: 'azure',
+      userId: sub.user_id
+    });
+
+    await recordSyncHistory(sub.id, {
+      provider: 'azure',
+      userId: sub.user_id,
+      tenantId,
+      status: 'completed',
+      resourcesFound: discoveredList.length,
+      resourcesUpdated: discoveredList.length,
+      resourcesDeleted: 0,
+      durationMs: totalMs
+    });
+
     console.log(
       `[DISCOVERY] ✅ Done: "${sub.name}" | ${discoveredList.length} resources | ${totalMs}ms`
     );
@@ -543,6 +731,32 @@ async function discoverAllResources(tenantId, subscriptionId, userAccessToken = 
     console.error(
       `[DISCOVERY] ❌ DB persistence failed for "${sub.name}" after ${totalMs}ms: ${error.message}`
     );
+
+    try {
+      await db.run('ROLLBACK');
+    } catch(rollbackErr) {
+      console.error('[DISCOVERY] Rollback failed:', rollbackErr.message);
+    }
+
+    // Record failure
+    await updateSyncStatus(sub.id, {
+      status: 'error',
+      phase: 'error',
+      progressCurrent: 0,
+      progressTotal: 100,
+      lastError: error.message || 'Azure Discovery Failed',
+      provider: 'azure',
+      userId: sub.user_id
+    });
+
+    await recordSyncHistory(sub.id, {
+      provider: 'azure',
+      userId: sub.user_id,
+      tenantId,
+      status: 'error',
+      errors: [error.message || 'Azure Discovery Failed'],
+      durationMs: totalMs
+    });
 
     try {
       await db.run(`

@@ -14,8 +14,8 @@ router.get('/users', async (req, res) => {
   const db = await getDatabase();
   const { search, role, status } = req.query;
   try {
-    let sql = `SELECT id, email, display_name, role, tenant_id, provider, last_login, status, mfa_enabled, created_at FROM users WHERE 1=1`;
-    const params = [];
+    let sql = `SELECT id, email, display_name, role, tenant_id, provider, last_login, status, mfa_enabled, created_at FROM users WHERE tenant_id = ?`;
+    const params = [req.tenantId];
 
     if (search) {
       sql += ` AND (email LIKE ? OR display_name LIKE ?)`;
@@ -61,12 +61,12 @@ router.patch('/users/:id/role', async (req, res) => {
 
   const db = await getDatabase();
   try {
-    const user = await db.get('SELECT email, role FROM users WHERE id = ?', [id]);
+    const user = await db.get('SELECT email, role FROM users WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'User not found or access denied.' });
     }
 
-    await db.run('UPDATE users SET role = ? WHERE id = ?', [role, id]);
+    await db.run('UPDATE users SET role = ? WHERE id = ? AND tenant_id = ?', [role, id, req.tenantId]);
     
     // Audit log
     await logAdminAudit(req.userEmail, `Role changed for user ${user.email} from ${user.role} to ${role}`, ip, userAgent);
@@ -89,12 +89,12 @@ router.patch('/users/:id/status', async (req, res) => {
 
   const db = await getDatabase();
   try {
-    const user = await db.get('SELECT email, status FROM users WHERE id = ?', [id]);
+    const user = await db.get('SELECT email, status FROM users WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'User not found or access denied.' });
     }
 
-    await db.run('UPDATE users SET status = ? WHERE id = ?', [status, id]);
+    await db.run('UPDATE users SET status = ? WHERE id = ? AND tenant_id = ?', [status, id, req.tenantId]);
     
     // Revoke sessions if disabled
     if (status === 'Disabled') {

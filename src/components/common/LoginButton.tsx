@@ -18,7 +18,7 @@ export const LoginButton: React.FC<LoginButtonProps> = ({
   onFailure,
   style,
 }) => {
-  const { login, loginWithGoogle, isLoading, providersConfig } = useAuth();
+  const { login, loginWithGoogle, isLoading, providersConfig, backendUnavailable, backendErrorType } = useAuth();
   const { inProgress } = useMsal();
   const [localLoading, setLocalLoading] = React.useState(false);
 
@@ -63,6 +63,37 @@ export const LoginButton: React.FC<LoginButtonProps> = ({
 
   const isConfigured = provider === 'microsoft' ? isMicrosoftConfigured : (provider === 'google' ? isGoogleConfigured : true); // AWS always shows as configured for now (simulated)
   const isPending = isLoading || localLoading || (provider === 'microsoft' && inProgress !== 'none');
+
+  if (backendUnavailable) {
+    let statusText = 'Backend Unavailable';
+    if (backendErrorType === 'unreachable') {
+      statusText = 'Backend Unreachable (Connection Refused)';
+    } else if (backendErrorType === 'server_error') {
+      statusText = 'Backend Server Error (500)';
+    } else if (backendErrorType === 'network_error') {
+      statusText = 'Backend Network Error';
+    }
+
+    return (
+      <div style={{
+        padding: '12px 16px',
+        borderRadius: 8,
+        background: 'rgba(239, 68, 68, 0.08)',
+        border: '1px solid rgba(239, 68, 68, 0.25)',
+        color: '#f87171',
+        fontSize: 13,
+        textAlign: 'center',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        ...style
+      }}>
+        <AlertCircle size={14} />
+        <span>{statusText}</span>
+      </div>
+    );
+  }
 
   if (!isConfigured) {
     return (

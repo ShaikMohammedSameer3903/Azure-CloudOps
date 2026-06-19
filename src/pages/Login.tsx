@@ -136,7 +136,7 @@ const getFriendlyError = (errStr: string): MappedError => {
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { login, loginWithGoogle, isAuthenticated, isLoading, msalRedirectError, user, providersConfig } = useAuth();
+  const { login, loginWithGoogle, isAuthenticated, isLoading, msalRedirectError, user, providersConfig, backendUnavailable, backendErrorType } = useAuth();
   const { inProgress } = useMsal();
 
   const isMicrosoftConfigured = providersConfig?.microsoft?.configured ?? false;
@@ -533,6 +533,35 @@ export default function Login() {
                       <li key={index} style={{ color: '#e2e8f0' }}>{inst}</li>
                     ))}
                   </ul>
+                </div>
+              </div>
+            )}
+
+            {backendUnavailable && (
+              <div style={{
+                background: 'rgba(239, 68, 68, 0.12)',
+                color: '#FF8F95',
+                padding: 16,
+                borderRadius: 10,
+                fontSize: 13,
+                marginBottom: 20,
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                lineHeight: 1.5,
+                textAlign: 'left'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                  <AlertCircle size={16} style={{ flexShrink: 0, marginTop: 2 }} aria-hidden="true" />
+                  <div>
+                    <strong style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 4, color: 'white' }}>
+                      Backend Service Offline
+                    </strong>
+                    <div>
+                      {backendErrorType === 'unreachable' && 'The frontend cannot connect to the backend API server. Please check if the Node backend is running on port 3001.'}
+                      {backendErrorType === 'server_error' && 'The backend API server returned an internal server error (500). Please check backend logs.'}
+                      {backendErrorType === 'network_error' && 'A network transmission error occurred while querying the backend services.'}
+                      {!backendErrorType && 'The backend API service is currently unavailable.'}
+                    </div>
+                  </div>
                 </div>
               </div>
             )}

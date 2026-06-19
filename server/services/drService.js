@@ -51,12 +51,35 @@ async function simulateDrillSteps(operationId, resourceId) {
 }
 
 async function getRecoveryScore(tenantId) {
-  // Compute simulated recovery score based on successful DR drills
+  const db = await getDatabase();
+  const drills = await db.all(`
+    SELECT status, COUNT(*) as count 
+    FROM operations 
+    WHERE tenant_id = ? AND name LIKE 'DR Drill:%'
+    GROUP BY status
+  `, [tenantId]);
+
+  let successfulDrills = 0;
+  let failedDrills = 0;
+  for (const row of drills) {
+    if (row.status === 'Succeeded') successfulDrills = row.count;
+    if (row.status === 'Failed') failedDrills = row.count;
+  }
+
+  const total = successfulDrills + failedDrills;
+  const score = total === 0 ? null : Math.round((successfulDrills / total) * 100);
+
+  const lastDrill = await db.get(`
+    SELECT created_at FROM operations 
+    WHERE tenant_id = ? AND name LIKE 'DR Drill:%' AND status = 'Succeeded'
+    ORDER BY created_at DESC LIMIT 1
+  `, [tenantId]);
+
   return {
-    score: 95,
-    lastTested: new Date().toISOString(),
-    failedDrills: 0,
-    successfulDrills: 12
+    score,
+    lastTested: lastDrill ? lastDrill.created_at : null,
+    failedDrills,
+    successfulDrills
   };
 }
 

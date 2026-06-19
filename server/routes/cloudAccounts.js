@@ -10,6 +10,32 @@ const ProviderFactory = require('../providers/ProviderFactory');
 const AwsCredentialManager = require('../providers/aws/AwsCredentialManager');
 const secretsManager = require('../services/secretsManager');
 const { enqueueJob } = require('../services/jobQueue');
+const { classifyCloudError } = require('../middleware/errorClassifier');
+const { logAudit } = require('../services/auditLogger');
+
+// Helper function to query a cloud account and enforce tenant and user isolation.
+// If the account does not exist, returns 404. If the user lacks access, returns 403.
+async function getAuthorizedAccount(db, id, req, res) {
+  const account = await db.get('SELECT * FROM cloud_accounts WHERE id = ?', [id]);
+  if (!account) {
+    res.status(404).json({ error: 'Cloud account not found' });
+    return null;
+  }
+
+  if (account.tenant_id !== req.tenantId) {
+    res.status(403).json({ error: 'Access denied: Unauthorized organization/tenant context.' });
+    return null;
+  }
+
+  const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+  const isUserAdmin = ADMIN_ROLES.includes((req.userRole || '').toLowerCase());
+  if (!isUserAdmin && account.user_id !== req.userId) {
+    res.status(403).json({ error: 'Access denied: You do not own this cloud account.' });
+    return null;
+  }
+
+  return account;
+}
 
 // ─────────────────────────────────────────────────────────
 // GET /api/cloud-accounts — List all accounts for tenant
@@ -17,14 +43,31 @@ const { enqueueJob } = require('../services/jobQueue');
 router.get('/', async (req, res) => {
   try {
     const db = await getDatabase();
-    let query = 'SELECT id, tenant_id, user_id, provider, account_name, subscription_id, account_id, region, status, last_sync, created_at FROM cloud_accounts WHERE user_id = ?';
-    const params = [req.userId];
+    const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+    let query = `
+      SELECT 
+        c.id, c.tenant_id, c.user_id, c.provider, c.account_name, 
+        c.subscription_id, c.account_id, c.region, c.status, c.last_sync, c.created_at,
+        u.email AS connected_by_email, u.name AS connected_by_name,
+        (SELECT COUNT(*) FROM resources r WHERE r.subscription_id = c.subscription_id OR r.subscription_id = c.account_id) AS resource_count,
+        sub.azure_tenant_id
+      FROM cloud_accounts c
+      LEFT JOIN users u ON c.user_id = u.id
+      LEFT JOIN azure_subscriptions sub ON c.id = sub.id
+      WHERE c.tenant_id = ?
+    `;
+    const params = [req.tenantId];
+
+    if (!ADMIN_ROLES.includes((req.userRole || '').toLowerCase())) {
+      query += ' AND c.user_id = ?';
+      params.push(req.userId);
+    }
 
     const accounts = await db.all(query, params);
-    // Never return secrets (access_key_id, secret_access_key, role_arn) in list view
     res.json(accounts);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -41,7 +84,7 @@ const handleAzureAccountAdd = async (req, res) => {
   try {
     const db = await getDatabase();
 
-    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
+    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
     if (existing) {
       return res.status(200).json({
         success: true,
@@ -66,9 +109,12 @@ const handleAzureAccountAdd = async (req, res) => {
     `, [id, req.tenantId, subscriptionId, accountName, clientId || null, encryptedSecret || null, azureTenantId || null, req.userId]);
 
     console.log(`[CloudAccounts] Azure account connected: ${accountName} (${subscriptionId})`);
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'ADD_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'azure', accountName, subscriptionId });
     res.status(201).json({ id, provider: 'azure', accountName, subscriptionId });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'ADD_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'azure', accountName, subscriptionId, error: err.message });
+    const classified = classifyCloudError(err, 'azure');
+    res.status(classified.status).json(classified.body);
   }
 };
 
@@ -154,6 +200,7 @@ const handleAwsAccountAdd = async (req, res) => {
       stack: validation.stack
     };
     console.error("AWS Discovery Error:", errorObj);
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'ADD_CLOUD_ACCOUNT', 'cloud_accounts', null, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'aws', accountName, accountId, error: validation.error });
     return res.status(400).json(errorObj);
   }
 
@@ -164,7 +211,7 @@ const handleAwsAccountAdd = async (req, res) => {
   try {
     const db = await getDatabase();
 
-    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
+    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
     if (existing) {
       return res.status(200).json({
         success: true,
@@ -196,6 +243,7 @@ const handleAwsAccountAdd = async (req, res) => {
     ]);
 
     console.log(`[CloudAccounts] AWS account connected: ${accountName} (${resolvedAccountId}) via ${roleArn ? 'AssumeRole' : 'AccessKeys'}`);
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'ADD_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'aws', accountName, accountId: resolvedAccountId });
     res.status(201).json({
       id,
       provider: 'aws',
@@ -205,7 +253,9 @@ const handleAwsAccountAdd = async (req, res) => {
       validatedArn: validation.arn,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'ADD_CLOUD_ACCOUNT', 'cloud_accounts', null, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'aws', accountName, accountId, error: err.message });
+    const classified = classifyCloudError(err, 'aws');
+    res.status(classified.status).json(classified.body);
   }
 };
 
@@ -224,7 +274,7 @@ const handleGcpAccountAdd = async (req, res) => {
   const id = `gcp-${projectId}`;
   try {
     const db = await getDatabase();
-    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
+    const existing = await db.get('SELECT id FROM cloud_accounts WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
     if (existing) {
       return res.status(200).json({
         success: true,
@@ -243,9 +293,12 @@ const handleGcpAccountAdd = async (req, res) => {
     `, [id, req.tenantId, req.userId, accountName, projectId, encryptedSecret]);
 
     console.log(`[CloudAccounts] GCP account connected: ${accountName} (${projectId})`);
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'ADD_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'gcp', accountName, projectId });
     res.status(201).json({ id, provider: 'gcp', accountName, projectId });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'ADD_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'gcp', accountName, projectId, error: err.message });
+    const classified = classifyCloudError(err, 'gcp');
+    res.status(classified.status).json(classified.body);
   }
 };
 
@@ -279,13 +332,12 @@ router.post('/:id/test', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?';
-    const params = [id, req.userId];
-    const account = await db.get(query, params);
-    if (!account) return res.status(404).json({ error: 'Cloud account not found' });
+    const account = await getAuthorizedAccount(db, id, req, res);
+    if (!account) return;
 
     if (account.provider === 'aws') {
       const result = await AwsCredentialManager.validateConnection(account);
+      await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', result.valid ? 'SUCCESS' : 'FAILURE', { provider: 'aws', accountId: result.accountId, error: result.error });
       return res.json({
         provider: 'aws',
         connected: result.valid,
@@ -295,10 +347,330 @@ router.post('/:id/test', async (req, res) => {
       });
     }
 
-    // Azure connectivity test would go here
+    if (account.provider === 'azure') {
+      const sub = await db.get('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
+      const azureTenantId = sub ? sub.azure_tenant_id : null;
+      const clientId = account.access_key_id;
+      const clientSecret = secretsManager.decryptSecret(account.secret_access_key);
+
+      if (!azureTenantId || !clientId || !clientSecret) {
+        if (sub && sub.auth_type === 'MSAL') {
+          await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'azure', details: 'MSAL auth' });
+          return res.json({
+            provider: 'azure',
+            connected: true,
+            message: 'MSAL (interactive sign-in) account verified.'
+          });
+        }
+        await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'azure', error: 'Missing tenant ID, Client ID, or Client Secret' });
+        return res.status(400).json({
+          provider: 'azure',
+          connected: false,
+          error: 'Azure Directory (Tenant) ID, Client ID, or Client Secret is missing.'
+        });
+      }
+
+      try {
+        const { ClientSecretCredential } = require('@azure/identity');
+        const credential = new ClientSecretCredential(azureTenantId, clientId, clientSecret);
+        await credential.getToken('https://management.azure.com/.default');
+        await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'azure' });
+        return res.json({
+          provider: 'azure',
+          connected: true,
+          message: 'Successfully authenticated with Azure Active Directory.'
+        });
+      } catch (err) {
+        await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'azure', error: err.message });
+        return res.json({
+          provider: 'azure',
+          connected: false,
+          error: err.message
+        });
+      }
+    }
+
+    if (account.provider === 'gcp') {
+      const serviceAccountJson = secretsManager.decryptSecret(account.secret_access_key);
+      const projectId = account.account_id;
+
+      if (!serviceAccountJson || !projectId) {
+        await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'gcp', error: 'Missing serviceAccountJson or projectId' });
+        return res.status(400).json({
+          provider: 'gcp',
+          connected: false,
+          error: 'GCP Service Account JSON credentials or Project ID is missing.'
+        });
+      }
+
+      try {
+        const { Storage } = require('@google-cloud/storage');
+        const creds = JSON.parse(serviceAccountJson);
+        const storage = new Storage({ credentials: creds, projectId });
+        await storage.getBuckets();
+        await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'gcp' });
+        return res.json({
+          provider: 'gcp',
+          connected: true,
+          message: 'Successfully authenticated with Google Cloud Platform.'
+        });
+      } catch (err) {
+        const isAuthError = err.message && (
+          err.message.includes('invalid_grant') || 
+          err.message.includes('Invalid JWT') || 
+          err.message.includes('Could not load the default credentials') ||
+          err.message.includes('No key found')
+        );
+        if (isAuthError) {
+          await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'gcp', error: err.message });
+          return res.json({
+            provider: 'gcp',
+            connected: false,
+            error: err.message
+          });
+        }
+        await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'gcp', warning: err.message });
+        return res.json({
+          provider: 'gcp',
+          connected: true,
+          warning: err.message,
+          message: 'Credentials valid, but access to resources is restricted: ' + err.message
+        });
+      }
+    }
+
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: account.provider, message: 'Connection test not implemented for this provider' });
     res.json({ provider: account.provider, connected: true, message: 'Connection test not implemented for this provider' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'TEST_CLOUD_ACCOUNT_CONNECTION', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// GET /api/cloud-accounts/:id — Get single account details
+// ─────────────────────────────────────────────────────────
+router.get('/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const db = await getDatabase();
+    const account = await getAuthorizedAccount(db, id, req, res);
+    if (!account) return;
+
+    let azureTenantId = null;
+    if (account.provider === 'azure') {
+      const sub = await db.get('SELECT azure_tenant_id FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
+      if (sub) {
+        azureTenantId = sub.azure_tenant_id;
+      }
+    }
+
+    res.json({
+      id: account.id,
+      provider: account.provider,
+      accountName: account.account_name,
+      subscriptionId: account.subscription_id,
+      accountId: account.account_id,
+      region: account.region,
+      roleArn: account.role_arn,
+      externalId: account.external_id ? '••••••••' : null,
+      accessKeyId: account.access_key_id ? (account.provider === 'azure' ? account.access_key_id : '••••••••') : null,
+      azureTenantId,
+      hasSecret: !!account.secret_access_key,
+    });
+  } catch (err) {
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// PUT /api/cloud-accounts/:id — Edit account
+// ─────────────────────────────────────────────────────────
+router.put('/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const db = await getDatabase();
+    const account = await getAuthorizedAccount(db, id, req, res);
+    if (!account) return;
+
+    const provider = account.provider.toLowerCase();
+
+    if (provider === 'azure') {
+      const { subscriptionId, accountName, azureTenantId, clientId, clientSecret } = req.body;
+
+      const newAccountName = accountName || account.account_name;
+      const newSubscriptionId = subscriptionId || account.subscription_id;
+
+      const sub = await db.get('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [id, req.tenantId]);
+
+      const newClientId = clientId || account.access_key_id;
+      const newAzureTenantId = azureTenantId || (sub ? sub.azure_tenant_id : null);
+
+      let encryptedSecret = account.secret_access_key;
+      let plainSecret = secretsManager.decryptSecret(account.secret_access_key);
+      if (clientSecret) {
+        encryptedSecret = secretsManager.encryptSecret(clientSecret);
+        plainSecret = clientSecret;
+      }
+
+      if (newClientId && plainSecret && newAzureTenantId) {
+        try {
+          const { ClientSecretCredential } = require('@azure/identity');
+          const credential = new ClientSecretCredential(
+            newAzureTenantId,
+            newClientId,
+            plainSecret
+          );
+          await credential.getToken('https://management.azure.com/.default');
+        } catch (err) {
+          console.error('[CloudAccounts] Azure validation failed on update:', err.message);
+          await logAudit(req.tenantId, req.userId, req.userEmail, 'EDIT_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'azure', error: 'Azure connection validation failed: ' + err.message });
+          return res.status(400).json({
+            success: false,
+            errorCode: 'VALIDATION_FAILED',
+            message: 'Azure connection validation failed: ' + err.message,
+            details: 'Please double-check Directory (Tenant) ID, Application (Client) ID, and Client Secret.'
+          });
+        }
+      }
+
+      await db.run(`
+        UPDATE cloud_accounts 
+        SET account_name = ?, subscription_id = ?, access_key_id = ?, secret_access_key = ?, status = 'Active'
+        WHERE id = ?
+      `, [newAccountName, newSubscriptionId, newClientId, encryptedSecret, id]);
+
+      await db.run(`
+        UPDATE azure_subscriptions
+        SET name = ?, subscription_id = ?, client_id = ?, client_secret = ?, azure_tenant_id = ?, status = 'Active'
+        WHERE id = ?
+      `, [newAccountName, newSubscriptionId, newClientId, encryptedSecret, newAzureTenantId, id]);
+
+      const { clearClientCache } = require('../services/azureCredentialManager');
+      clearClientCache(req.tenantId, newSubscriptionId);
+
+      console.log(`[CloudAccounts] Azure account updated: ${newAccountName} (${newSubscriptionId})`);
+      await logAudit(req.tenantId, req.userId, req.userEmail, 'EDIT_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'azure', accountName: newAccountName, subscriptionId: newSubscriptionId });
+      return res.json({ id, provider: 'azure', accountName: newAccountName, subscriptionId: newSubscriptionId });
+
+    } else if (provider === 'aws') {
+      const { accountName, region, roleArn, externalId, accessKeyId, secretAccessKey, sessionToken, accountId } = req.body;
+
+      const newAccountName = accountName || account.account_name;
+      const newRegion = region || account.region || 'us-east-1';
+      const newRoleArn = roleArn !== undefined ? roleArn : account.role_arn;
+      const newAccountId = accountId || account.account_id;
+
+      const resolvedExternalId = externalId ? externalId : secretsManager.decryptSecret(account.external_id);
+      const resolvedAccessKeyId = accessKeyId ? accessKeyId : secretsManager.decryptSecret(account.access_key_id);
+      const resolvedSecretAccessKey = secretAccessKey ? secretAccessKey : secretsManager.decryptSecret(account.secret_access_key);
+
+      const encExternalId = resolvedExternalId ? secretsManager.encryptSecret(resolvedExternalId) : null;
+      const encAccessKeyId = resolvedAccessKeyId ? secretsManager.encryptSecret(resolvedAccessKeyId) : null;
+      const encSecretAccessKey = resolvedSecretAccessKey ? secretsManager.encryptSecret(resolvedSecretAccessKey) : null;
+
+      const tempAccount = {
+        account_id: newAccountId,
+        region: newRegion,
+        role_arn: newRoleArn || null,
+        external_id: resolvedExternalId || null,
+        access_key_id: resolvedAccessKeyId || null,
+        secret_access_key: resolvedSecretAccessKey || null,
+        session_token: sessionToken || null,
+      };
+
+      console.log(`[CloudAccounts] Validating AWS connection on update for: ${newAccountName}...`);
+      const validation = await AwsCredentialManager.validateConnection(tempAccount);
+
+      if (!validation.valid) {
+        await logAudit(req.tenantId, req.userId, req.userEmail, 'EDIT_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'aws', error: validation.error });
+        return res.status(400).json({
+          success: false,
+          errorCode: validation.errorCode || 'VALIDATION_FAILED',
+          message: validation.error,
+          details: 'Ensure the IAM role trust policy allows this account, or check your access keys.'
+        });
+      }
+
+      const resolvedAccountId = validation.accountId || newAccountId || 'unknown';
+
+      await db.run(`
+        UPDATE cloud_accounts
+        SET account_name = ?, account_id = ?, region = ?, role_arn = ?, external_id = ?, access_key_id = ?, secret_access_key = ?, status = 'Active'
+        WHERE id = ?
+      `, [
+        newAccountName,
+        resolvedAccountId,
+        newRegion,
+        newRoleArn || null,
+        encExternalId,
+        encAccessKeyId,
+        encSecretAccessKey,
+        id
+      ]);
+
+      console.log(`[CloudAccounts] AWS account updated: ${newAccountName} (${resolvedAccountId})`);
+      await logAudit(req.tenantId, req.userId, req.userEmail, 'EDIT_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'aws', accountName: newAccountName, accountId: resolvedAccountId });
+      return res.json({ id, provider: 'aws', accountName: newAccountName, accountId: resolvedAccountId });
+
+    } else if (provider === 'gcp') {
+      const { accountName, projectId, serviceAccountJson } = req.body;
+
+      const newAccountName = accountName || account.account_name;
+      const newProjectId = projectId || account.account_id;
+
+      let encryptedSecret = account.secret_access_key;
+      let plainSecret = secretsManager.decryptSecret(account.secret_access_key);
+      if (serviceAccountJson) {
+        encryptedSecret = secretsManager.encryptSecret(serviceAccountJson);
+        plainSecret = serviceAccountJson;
+      }
+
+      if (newProjectId && plainSecret) {
+        try {
+          const { Storage } = require('@google-cloud/storage');
+          const creds = JSON.parse(plainSecret);
+          const storage = new Storage({ credentials: creds, projectId: newProjectId });
+          await storage.getBuckets();
+        } catch (err) {
+          const isAuthError = err.message && (
+            err.message.includes('invalid_grant') || 
+            err.message.includes('Invalid JWT') || 
+            err.message.includes('Could not load the default credentials') ||
+            err.message.includes('No key found')
+          );
+          if (isAuthError) {
+            console.error('[CloudAccounts] GCP validation failed on update:', err.message);
+            await logAudit(req.tenantId, req.userId, req.userEmail, 'EDIT_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { provider: 'gcp', error: 'GCP Service Account validation failed: ' + err.message });
+            return res.status(400).json({
+              success: false,
+              errorCode: 'VALIDATION_FAILED',
+              message: 'GCP Service Account validation failed: ' + err.message,
+              details: 'Please ensure your service account JSON key is valid and not expired.'
+            });
+          }
+        }
+      }
+
+      await db.run(`
+        UPDATE cloud_accounts
+        SET account_name = ?, account_id = ?, secret_access_key = ?, status = 'Active'
+        WHERE id = ?
+      `, [newAccountName, newProjectId, encryptedSecret, id]);
+
+      console.log(`[CloudAccounts] GCP account updated: ${newAccountName} (${newProjectId})`);
+      await logAudit(req.tenantId, req.userId, req.userEmail, 'EDIT_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: 'gcp', accountName: newAccountName, projectId: newProjectId });
+      return res.json({ id, provider: 'gcp', accountName: newAccountName, projectId: newProjectId });
+    } else {
+      return res.status(400).json({ error: `Unsupported provider for update: ${account.provider}` });
+    }
+  } catch (err) {
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'EDIT_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -309,10 +681,8 @@ router.post('/:id/sync', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?';
-    const params = [id, req.userId];
-    const account = await db.get(query, params);
-    if (!account) return res.status(404).json({ error: 'Cloud account not found' });
+    const account = await getAuthorizedAccount(db, id, req, res);
+    if (!account) return;
 
     const opId = await enqueueJob(
       account.tenant_id,
@@ -323,6 +693,7 @@ router.post('/:id/sync', async (req, res) => {
     );
 
     console.log(`[CloudAccounts] Sync queued for ${account.account_name} (${account.provider})`);
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'SYNC_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: account.provider, operationId: opId });
     res.json({
       status: 'success',
       message: 'Sync job queued in background',
@@ -331,7 +702,9 @@ router.post('/:id/sync', async (req, res) => {
     });
   } catch (err) {
     console.error(`[CloudAccounts] Sync failed for ${id}:`, err);
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'SYNC_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -342,16 +715,19 @@ router.post('/:id/discover', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    const account = await db.get('SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
-    if (!account) return res.status(404).json({ error: 'Cloud account not found or access denied.' });
+    const account = await getAuthorizedAccount(db, id, req, res);
+    if (!account) return;
 
     // Start discovery asynchronously
     const { discoverCloudAccount } = require('../services/discoveryEngine');
     discoverCloudAccount(req.tenantId, id).catch(e => console.error(`[DISCOVERY] Async discovery failed for ${id}:`, e.message));
 
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'DISCOVER_CLOUD_RESOURCES', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: account.provider });
     res.json({ success: true, message: 'Discovery started asynchronously.' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'DISCOVER_CLOUD_RESOURCES', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -362,10 +738,8 @@ router.post('/:id/refresh', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND user_id = ?';
-    const params = [id, req.userId];
-    const account = await db.get(query, params);
-    if (!account) return res.status(404).json({ error: 'Cloud account not found' });
+    const account = await getAuthorizedAccount(db, id, req, res);
+    if (!account) return;
 
     const provider = ProviderFactory.getProvider(account);
     const [resources, security, cost, backup] = await Promise.allSettled([
@@ -375,6 +749,7 @@ router.post('/:id/refresh', async (req, res) => {
       provider.getBackup(),
     ]);
 
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'REFRESH_CLOUD_ACCOUNT_CREDENTIALS', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: account.provider });
     res.json({
       status: 'success',
       provider: account.provider,
@@ -384,7 +759,9 @@ router.post('/:id/refresh', async (req, res) => {
       backup: backup.status === 'fulfilled' ? backup.value.totalProtectedItems : 0,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'REFRESH_CLOUD_ACCOUNT_CREDENTIALS', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 
@@ -395,29 +772,26 @@ router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   try {
     const db = await getDatabase();
-    let query = 'SELECT * FROM cloud_accounts WHERE id = ? AND tenant_id = ?';
-    const params = [id, req.tenantId];
-    if (req.userRole !== 'Admin' && req.userRole !== 'SuperAdmin') {
-      query += ' AND user_id = ?';
-      params.push(req.userId);
-    }
-    const account = await db.get(query, params);
-    if (!account) return res.status(404).json({ error: 'Cloud account not found' });
+    const account = await getAuthorizedAccount(db, id, req, res);
+    if (!account) return;
 
-    await db.run('DELETE FROM cloud_accounts WHERE id = ? AND user_id = ?', [id, req.userId]);
+    await db.run('DELETE FROM cloud_accounts WHERE id = ?', [id]);
 
     // Clean up resources associated with this account
     await db.run('DELETE FROM resources WHERE subscription_id = ?', [account.subscription_id || account.account_id]);
 
     // Also remove from azure_subscriptions for backwards compatibility
     if (account.provider === 'azure') {
-      await db.run('DELETE FROM azure_subscriptions WHERE id = ? AND user_id = ?', [id, req.userId]);
+      await db.run('DELETE FROM azure_subscriptions WHERE id = ?', [id]);
     }
 
     console.log(`[CloudAccounts] Removed ${account.provider} account: ${account.account_name}`);
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'REMOVE_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'SUCCESS', { provider: account.provider, accountName: account.account_name });
     res.json({ status: 'success', removed: account.account_name });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await logAudit(req.tenantId, req.userId, req.userEmail, 'REMOVE_CLOUD_ACCOUNT', 'cloud_accounts', id, req.ip || req.connection?.remoteAddress || '127.0.0.1', 'FAILURE', { error: err.message });
+    const classified = classifyCloudError(err, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

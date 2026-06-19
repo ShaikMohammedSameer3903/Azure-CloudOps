@@ -9,6 +9,7 @@ const { getDatabase } = require('../db/database');
 const { getCostConsumption, getBackupHealth, getSecurityScore } = require('../services/monitoringService');
 const { subscriptionAccessClause } = require('../middleware/subscriptionSecurity');
 const { generatePdfReport, generateExcelReport } = require('../services/reportingService');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 // 1. GET /api/reports/executive - Retrieve executive summary report payload
 router.get('/executive', async (req, res) => {
@@ -164,8 +165,8 @@ router.get('/executive', async (req, res) => {
 
     res.json(payload);
   } catch (error) {
-    console.error('[ROUTES] GET /reports/executive failed:', error);
-    res.status(500).json({ error: 'Failed to generate executive report dataset.' });
+    const classified = classifyCloudError(error, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

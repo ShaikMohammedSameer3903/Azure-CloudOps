@@ -36,6 +36,8 @@ export default function AzureDashboard() {
   const azureAccounts = cloudAccounts.filter(a => a.provider === 'azure');
 
   const [loading, setLoading] = useState(true);
+  const [costError, setCostError] = useState<string | null>(null);
+  const [securityError, setSecurityError] = useState<string | null>(null);
 
   const fetchAll = async (subId?: string) => {
     setIsRefreshing(true);
@@ -72,11 +74,21 @@ export default function AzureDashboard() {
           })),
           forecast: [],
         });
+        setCostError(null);
+      } else {
+        const err = costResult.reason;
+        setCostError(err.message || 'Billing Reader role required');
+        setCostSummary(null);
       }
       if (secResult.status === 'fulfilled') {
         const s = secResult.value;
         if (s?.score) setSecurityScore(s.score);
         if (s?.secureScore) setSecurityScore(s.secureScore);
+        setSecurityError(null);
+      } else {
+        const err = secResult.reason;
+        setSecurityError(err.message || 'Security Reader role required');
+        setSecurityScore(null);
       }
       if (backupResult.status === 'fulfilled') {
         const b = backupResult.value;
@@ -200,22 +212,36 @@ export default function AzureDashboard() {
           <div className="kpi-trend" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Blob / Files / Queue / Table</div>
         </div>
 
-        <div className="kpi-card" onClick={() => navigate('/azure/security')} style={{ cursor: 'pointer' }}>
+         <div className="kpi-card" onClick={() => navigate('/azure/security')} style={{ cursor: 'pointer' }}>
           <div className="kpi-card-accent" style={{ background: `linear-gradient(90deg, ${secColor}, ${secColor}88)` }} />
           <div className="kpi-card-top">
-            <div><div className="kpi-label">Security Score</div><div className="kpi-value" style={{ color: secColor }}>{secPct != null ? `${Math.round(secPct)}%` : '—'}</div></div>
+            <div>
+              <div className="kpi-label">Security Score</div>
+              <div className="kpi-value" style={{ color: secColor, fontSize: securityError ? '11px' : undefined, whiteSpace: 'normal', lineHeight: '1.2' }}>
+                {securityError ? securityError : (secPct != null ? `${Math.round(secPct)}%` : '—')}
+              </div>
+            </div>
             <div className="kpi-icon" style={{ background: `${secColor}18` }}><Shield size={20} color={secColor} /></div>
           </div>
-          <div className="kpi-trend" style={{ color: secColor, fontSize: 12 }}>{secPct != null ? 'Microsoft Defender' : 'Awaiting data…'}</div>
+          <div className="kpi-trend" style={{ color: securityError ? '#D13438' : secColor, fontSize: 12 }}>
+            {securityError ? 'Discovery Failed' : (secPct != null ? 'Microsoft Defender' : 'Awaiting data…')}
+          </div>
         </div>
 
         <div className="kpi-card" onClick={() => navigate('/azure/cost')} style={{ cursor: 'pointer' }}>
           <div className="kpi-card-accent" style={{ background: 'linear-gradient(90deg, #FFB900, #f97316)' }} />
           <div className="kpi-card-top">
-            <div><div className="kpi-label">Monthly Cost</div><div className="kpi-value">{fmtCurrency(costSummary?.totalSpend)}</div></div>
+            <div>
+              <div className="kpi-label">Monthly Cost</div>
+              <div className="kpi-value" style={{ fontSize: costError ? '11px' : undefined, whiteSpace: 'normal', lineHeight: '1.2' }}>
+                {costError ? costError : (costSummary?.totalSpend != null ? fmtCurrency(costSummary.totalSpend) : '—')}
+              </div>
+            </div>
             <div className="kpi-icon" style={{ background: 'rgba(255,185,0,.1)' }}><DollarSign size={20} color="#FFB900" /></div>
           </div>
-          <div className="kpi-trend" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Azure Cost Management API</div>
+          <div className="kpi-trend" style={{ color: costError ? '#D13438' : 'var(--text-tertiary)', fontSize: 12 }}>
+            {costError ? 'API Returned No Data' : 'Azure Cost Management API'}
+          </div>
         </div>
       </div>
 

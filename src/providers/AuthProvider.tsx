@@ -43,6 +43,8 @@ interface AuthContextType {
   azureConsentMissing: boolean;
   grantAzureConsent: () => Promise<string | null>;
   providersConfig: ProvidersConfig;
+  backendUnavailable: boolean;
+  backendErrorType: 'unreachable' | 'server_error' | 'network_error' | null;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -63,6 +65,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     aws: { configured: true },
     local: { configured: true, clientId: null, error: null }
   });
+  const [backendUnavailable, setBackendUnavailable] = useState(false);
+  const [backendErrorType, setBackendErrorType] = useState<'unreachable' | 'server_error' | 'network_error' | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [token, setToken] = useState<string | null>(() => {
     return localStorage.getItem('cloudops-local-token');
@@ -76,12 +80,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const fetchProviders = async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/auth/providers`);
-        if (response.ok && active) {
-          const data = await response.json();
-          setProvidersConfig(data);
+        if (active) {
+          if (response.ok) {
+            const data = await response.json();
+            setProvidersConfig(data);
+            setBackendUnavailable(false);
+            setBackendErrorType(null);
+          } else {
+            setBackendUnavailable(true);
+            setBackendErrorType('server_error');
+          }
         }
       } catch (err) {
         console.error('[AuthProvider] Failed to fetch auth providers configuration:', err);
+        if (active) {
+          setBackendUnavailable(true);
+          setBackendErrorType('unreachable');
+        }
       }
     };
     fetchProviders();
@@ -291,21 +306,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Helper: exchange an MSAL token result for a local session
   const exchangeEntraToken = async (result: { idToken: string; account: any }) => {
-    const exchangeResponse = await fetch(`${API_BASE_URL}/api/auth/entra-login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        idToken:     result.idToken,
-        email:       result.account.username,
-        displayName: result.account.name || result.account.username,
-        tenantId:    result.account.tenantId,
-        oid:         result.account.localAccountId || result.account.homeAccountId,
-      }),
-    });
+    let exchangeResponse: Response;
+    try {
+      exchangeResponse = await fetch(`${API_BASE_URL}/api/auth/entra-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idToken:     result.idToken,
+          email:       result.account.username,
+          displayName: result.account.name || result.account.username,
+          tenantId:    result.account.tenantId,
+          oid:         result.account.localAccountId || result.account.homeAccountId,
+        }),
+      });
+    } catch (networkErr: any) {
+      // Network-level failure (CORS blocked, backend unreachable, DNS error)
+      console.error('[AuthProvider] Network error during Entra token exchange:', networkErr);
+      throw new Error(
+        'Unable to reach the authentication server. This may be a CORS or network issue. ' +
+        'Please ensure the backend is running and your origin is allowed.',
+        { cause: networkErr }
+      );
+    }
 
     if (!exchangeResponse.ok) {
       const errData = await exchangeResponse.json().catch(() => ({}));
-      throw new Error(errData.error || 'Access Denied: Pre-approval check failed.');
+      const errorMsg = errData.error || 'Access Denied: Pre-approval check failed.';
+      const errorCode = errData.code || '';
+      // Include the error code for better debugging
+      throw new Error(errorCode ? `${errorMsg} (${errorCode})` : errorMsg);
     }
 
     const data = await exchangeResponse.json();
@@ -556,6 +585,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         azureConsentMissing,
         grantAzureConsent,
         providersConfig,
+        backendUnavailable,
+        backendErrorType,
       }}
     >
       {children}

@@ -21,19 +21,32 @@ console.log('[DEPLOYMENT CHECK] Launching backend server...');
 
 const backend = spawn('node', [serverPath], {
   env: { ...process.env, PORT: '3001' },
-  shell: true
+  shell: false
 });
 
 // Capture backend output to check for password printing
 let generatedPassword = null;
 backend.stdout.on('data', (data) => {
   const output = data.toString();
+  process.stdout.write(`[BACKEND STDOUT] ${output}`);
   if (output.includes('Password:')) {
     const match = output.match(/Password:\s*([^\s]+)/);
     if (match) {
       generatedPassword = match[1];
     }
   }
+});
+
+backend.stderr.on('data', (data) => {
+  process.stderr.write(`[BACKEND STDERR] ${data.toString()}`);
+});
+
+backend.on('error', (err) => {
+  console.error('[DEPLOYMENT CHECK] Backend process error:', err);
+});
+
+backend.on('exit', (code, signal) => {
+  console.log(`[DEPLOYMENT CHECK] Backend process exited with code ${code} and signal ${signal}`);
 });
 
 // Helper to query http
@@ -92,7 +105,7 @@ function postJson(url, payload) {
 }
 
 // 3. Retry connection loop
-let retries = 10;
+let retries = 45;
 const probeInterval = 1000;
 
 function runValidation() {
@@ -102,12 +115,12 @@ function runValidation() {
     process.exit(1);
   }
 
-  getJson('http://localhost:3001/health')
+  getJson('http://127.0.0.1:3001/health')
     .then(async () => {
       console.log('✓ [DEPLOYMENT CHECK] Backend is healthy & listening.');
 
       // Query Deployment Health Endpoint
-      const deployHealth = await getJson('http://localhost:3001/api/health/deployment');
+      const deployHealth = await getJson('http://127.0.0.1:3001/api/health/deployment');
       console.log('[DEPLOYMENT CHECK] Deployment status payload:', deployHealth);
 
       if (deployHealth.database !== 'healthy') {
@@ -121,9 +134,13 @@ function runValidation() {
 
       // Check login works using the actual single admin account temporarily
       console.log('[DEPLOYMENT CHECK] Swapping admin password hash for validation check...');
-      const BetterSQLite3 = require('../server/node_modules/better-sqlite3');
+      const sqlite3 = require('../server/node_modules/sqlite3');
+      const { open } = require('../server/node_modules/sqlite');
       const dbPath = path.resolve(__dirname, '../server/cloudops.db');
-      const db = new BetterSQLite3(dbPath);
+      const db = await open({
+        filename: dbPath,
+        driver: sqlite3.Database
+      });
       
       const adminEmail = 'shaiksameer3909sam@gmail.com';
       const bcrypt = require('../server/node_modules/bcryptjs');
@@ -131,7 +148,7 @@ function runValidation() {
       const newHash = bcrypt.hashSync(testPass, 10);
 
       // Save original hash to restore later
-      const row = db.prepare('SELECT password_hash FROM users WHERE email = ?').get(adminEmail);
+      const row = await db.get('SELECT password_hash FROM users WHERE email = ?', [adminEmail]);
       const originalHash = row ? row.password_hash : null;
 
       if (!originalHash) {
@@ -139,11 +156,11 @@ function runValidation() {
       }
 
       // Temporarily update to validation hash
-      db.prepare('UPDATE users SET password_hash = ? WHERE email = ?').run(newHash, adminEmail);
+      await db.run('UPDATE users SET password_hash = ? WHERE email = ?', [newHash, adminEmail]);
 
       console.log('[DEPLOYMENT CHECK] Attempting auth login request...');
       try {
-        const loginRes = await postJson('http://localhost:3001/api/auth/login', {
+        const loginRes = await postJson('http://127.0.0.1:3001/api/auth/login', {
           email: adminEmail,
           password: testPass
         });
@@ -155,7 +172,7 @@ function runValidation() {
 
         // Test API Reachability and token verification
         console.log('[DEPLOYMENT CHECK] Probing protected api status endpoint...');
-        const statusRes = await getJson('http://localhost:3001/api/status', {
+        const statusRes = await getJson('http://127.0.0.1:3001/api/status', {
           headers: {
             'Authorization': `Bearer ${loginRes.token}`
           }
@@ -169,10 +186,10 @@ function runValidation() {
       } finally {
         // Restore DB original admin password hash
         if (originalHash) {
-          db.prepare('UPDATE users SET password_hash = ? WHERE email = ?').run(originalHash, adminEmail);
+          await db.run('UPDATE users SET password_hash = ? WHERE email = ?', [originalHash, adminEmail]);
           console.log('[DEPLOYMENT CHECK] Restored original admin password hash.');
         }
-        db.close();
+        await db.close();
       }
 
       console.log('====================================================');

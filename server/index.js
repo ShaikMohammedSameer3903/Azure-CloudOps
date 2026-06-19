@@ -69,41 +69,85 @@ const compression = require('compression');
 app.use(compression());
 
 // CORS Configuration - Production Hardened
+// Build allowed origins from environment + hardcoded defaults
 const allowedOrigins = [
+  // Local development (Vite may auto-increment ports when occupied)
   'http://localhost:5173',
-  'https://azure-cloud-ops.vercel.app'
+  'http://localhost:5174',
+  'http://localhost:5175',
+  'http://localhost:5176',
+  // Production
+  'https://azure-cloud-ops.vercel.app',
+  'https://www.azure-cloud-ops.vercel.app',
 ];
-app.use(cors({
+
+// Add FRONTEND_URL from env if set and not already included
+if (process.env.FRONTEND_URL && !allowedOrigins.includes(process.env.FRONTEND_URL)) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
+// Add any extra origins from ALLOWED_ORIGINS env var (comma-separated)
+if (process.env.ALLOWED_ORIGINS) {
+  process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean).forEach(origin => {
+    if (!allowedOrigins.includes(origin)) {
+      allowedOrigins.push(origin);
+    }
+  });
+}
+
+console.log('[CORS] Allowed origins:', allowedOrigins.join(', '));
+
+const corsOptions = {
   origin: function (origin, callback) {
+    // Allow requests with no origin (server-to-server, curl, health checks)
     if (!origin) return callback(null, true);
-    
+
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    
-    // Allow dynamic Vercel previews: https://*.vercel.app
+
+    // Allow dynamic Vercel preview deployments: https://*.vercel.app
     if (origin.startsWith('https://') && origin.endsWith('.vercel.app')) {
       return callback(null, true);
     }
-    
-    callback(new Error('CORS: origin not allowed'));
+
+    // Reject with 403 — do NOT throw an Error (which would cause Express to return 500)
+    console.warn(`[CORS] Rejected origin: ${origin}. Allowed: [${allowedOrigins.join(', ')}]`);
+    return callback(null, false);
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
-    'Authorization', 
-    'Content-Type', 
-    'Accept', 
-    'Origin', 
-    'X-Requested-With', 
-    'x-azure-token', 
-    'x-api-key', 
-    'x-access-token', 
+    'Authorization',
+    'Content-Type',
+    'Accept',
+    'Origin',
+    'X-Requested-With',
+    'x-azure-token',
+    'x-api-key',
+    'x-access-token',
     'x-request-id'
   ],
   credentials: true
-}));
-// Handle preflight requests
-app.options('*', cors());
+};
+app.use(cors(corsOptions));
+
+// Handle preflight requests with the SAME CORS config (not defaults)
+app.options('*', cors(corsOptions));
+
+// Middleware to intercept CORS-rejected requests and return a clear 403
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  // If a browser sent an Origin header but the response has no Access-Control-Allow-Origin,
+  // the browser will block it. We also return a helpful 403 body for debugging.
+  if (origin && !res.getHeader('access-control-allow-origin')) {
+    return res.status(403).json({
+      error: `Origin ${origin} is not allowed by server CORS policy.`,
+      code: 'CORS_ORIGIN_REJECTED',
+      allowedOrigins: allowedOrigins
+    });
+  }
+  next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -335,14 +379,23 @@ app.use(`${apiPrefix}/sync`, validateJwt, tenantContext, auditLogger, require('.
 app.get(`${apiPrefix}/dashboard`, validateJwt, tenantContext, auditLogger, async (req, res) => {
   try {
     const db = await getDatabase();
+    const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+    const isAdmin = ADMIN_ROLES.includes((req.userRole || '').toLowerCase());
     
     // Total resources count by provider
-    const resources = await db.all(`
+    let resQuery = `
       SELECT provider, COUNT(*) as count 
       FROM resources 
-      WHERE user_id = ? 
-      GROUP BY provider
-    `, [req.userId]);
+      WHERE tenant_id = ?
+    `;
+    let resParams = [req.tenantId];
+    if (!isAdmin) {
+      resQuery += ' AND user_id = ?';
+      resParams.push(req.userId);
+    }
+    resQuery += ' GROUP BY provider';
+
+    const resources = await db.all(resQuery, resParams);
     
     let totalResources = 0;
     let azureResources = 0;
@@ -358,12 +411,19 @@ app.get(`${apiPrefix}/dashboard`, validateJwt, tenantContext, auditLogger, async
     });
 
     // Cloud accounts count by provider
-    const accounts = await db.all(`
+    let accQuery = `
       SELECT provider, COUNT(*) as count 
       FROM cloud_accounts 
-      WHERE user_id = ? 
-      GROUP BY provider
-    `, [req.userId]);
+      WHERE tenant_id = ?
+    `;
+    let accParams = [req.tenantId];
+    if (!isAdmin) {
+      accQuery += ' AND user_id = ?';
+      accParams.push(req.userId);
+    }
+    accQuery += ' GROUP BY provider';
+
+    const accounts = await db.all(accQuery, accParams);
 
     let totalAccounts = 0;
     let azureAccounts = 0;
@@ -379,22 +439,34 @@ app.get(`${apiPrefix}/dashboard`, validateJwt, tenantContext, auditLogger, async
     });
 
     // Get security incidents count
-    const incidents = await db.all(`
+    let incQuery = `
       SELECT severity, status FROM incidents 
-      WHERE tenant_id = ? AND user_id = ? AND category = 'Security'
-    `, [req.tenantId, req.userId]);
+      WHERE tenant_id = ? AND category = 'Security'
+    `;
+    let incParams = [req.tenantId];
+    if (!isAdmin) {
+      incQuery += ' AND user_id = ?';
+      incParams.push(req.userId);
+    }
+    const incidents = await db.all(incQuery, incParams);
 
     const openIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED').length;
     const criticalIncidents = incidents.filter(i => i.severity === 'CRITICAL' || i.severity === 'SEV0').length;
 
     // Calculate score
     const awsSecurityService = require('./services/awsSecurityService');
-    const secStats = await awsSecurityService.getDashboardStats(req.tenantId, req.userId);
+    const secStats = await awsSecurityService.getDashboardStats(req.tenantId, req.userId, req.userRole);
 
     // Sum resource cost
-    const costRow = await db.get(`
-      SELECT SUM(cost_impact) as total_cost FROM resources WHERE user_id = ?
-    `, [req.userId]);
+    let costQuery = `
+      SELECT SUM(cost_impact) as total_cost FROM resources WHERE tenant_id = ?
+    `;
+    let costParams = [req.tenantId];
+    if (!isAdmin) {
+      costQuery += ' AND user_id = ?';
+      costParams.push(req.userId);
+    }
+    const costRow = await db.get(costQuery, costParams);
     const totalCost = costRow ? (costRow.total_cost || 0) : 0;
 
     res.json({
@@ -436,29 +508,6 @@ app.use(`${apiPrefix}/ai`, validateJwt, tenantContext, validateSubscriptionAcces
 app.use(`${apiPrefix}/reports`, validateJwt, tenantContext, adminOnly, validateSubscriptionAccess, auditLogger, require('./routes/reports'));
 app.use(`${apiPrefix}/sentinel`, validateJwt, tenantContext, adminOnly, validateSubscriptionAccess, auditLogger, require('./routes/sentinel'));
 app.use(`${apiPrefix}/governance`, validateJwt, tenantContext, adminOnly, validateSubscriptionAccess, auditLogger, require('./routes/governance'));
-
-// 404 Handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
-});
-
-// Global Error Handler — uses errorClassifier for cloud errors
-app.use((err, req, res, next) => {
-  if (res.headersSent) return next(err);
-  
-  const { classifyCloudError, detectProvider } = require('./middleware/errorClassifier');
-  const provider = detectProvider(err, req, 'unknown');
-  const classified = classifyCloudError(err, provider);
-  
-  // Only use classified status if it's not a generic 502
-  const status = classified.status !== 502 ? classified.status : (err.status || 500);
-  
-  console.error(`[SERVER] Global Error (${status}):`, err.message || err);
-  res.status(status).json({
-    error: err.message || 'Internal Server Error',
-    ...classified.body
-  });
-});
 
 // Compatibility Endpoints for Direct Verification Queries
 app.get(`${apiPrefix}/security`, validateJwt, tenantContext, auditLogger, async (req, res) => {
@@ -548,21 +597,61 @@ app.get('/api/status', validateJwt, tenantContext, async (req, res) => {
   }
 });
 
+// 404 Handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// Global Error Handler — uses errorClassifier for cloud errors
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+
+  // Handle CORS errors specifically — return 403 with clear message
+  if (err.message && err.message.includes('CORS')) {
+    const origin = req.headers.origin || 'unknown';
+    console.warn(`[CORS ERROR] Origin: ${origin} | Message: ${err.message}`);
+    return res.status(403).json({
+      error: `Origin ${origin} is not allowed by server CORS policy.`,
+      code: 'CORS_ORIGIN_REJECTED',
+      details: err.message
+    });
+  }
+
+  const { classifyCloudError, detectProvider } = require('./middleware/errorClassifier');
+  const provider = detectProvider(err, req, 'unknown');
+  const classified = classifyCloudError(err, provider);
+  
+  // Only use classified status if it's not a generic 502
+  const status = classified.status !== 502 ? classified.status : (err.status || 500);
+  
+  console.error(`[SERVER] Global Error (${status}):`, err.message || err);
+  res.status(status).json({
+    error: err.message || 'Internal Server Error',
+    ...classified.body
+  });
+});
+
 // Initialize Database & Start Server
 let activeServer = null;
 
 async function startServer() {
+  console.log('[SERVER] Express server starting...');
+  
   try {
+    const initialPort = Number(PORT);
+    console.log(`[SERVER] Selected port: ${initialPort}`);
+
     // ── Environment Variable Validation ──
     const { validateAuthConfig } = require('./services/authConfigValidator');
     validateAuthConfig();
+    console.log('[SERVER] OAuth initialized...');
 
     // Initialize Secrets Manager first
     await secretsManager.initialize();
 
     // Initialize database connection and schemas
     await getDatabase();
-    console.log('[DB] Database initialized successfully.');
+    console.log('[SERVER] Database initialized...');
 
     // Run V12 schema migration (idempotent)
     try {
@@ -572,22 +661,70 @@ async function startServer() {
       console.warn('[DB] V12 migration warning:', migErr.message);
     }
 
+    console.log('[SERVER] Routes registered...');
+
     // Background resource discovery engine is now started dynamically upon Microsoft Entra ID Login
     const { startReportScheduler } = require('./services/reportingService');
     startReportScheduler();
     
     const { startJobQueue } = require('./services/jobQueue');
     startJobQueue();
+    console.log('[SERVER] Scheduler started...');
     
     const { initGateway } = require('./websockets/gateway');
 
-    activeServer = app.listen(PORT, '0.0.0.0', () => {
-      console.log(`[SERVER] CloudOps Enterprise API running live on http://0.0.0.0:${PORT}`);
+    // Make startup resilient to occupied ports
+    const serverInstance = credentials 
+      ? https.createServer(credentials, app) 
+      : require('http').createServer(app);
+
+    const host = '0.0.0.0';
+    const actualPort = await new Promise((resolve) => {
+      let currentPort = initialPort;
+
+      function tryListen() {
+        serverInstance.once('error', (err) => {
+          if (err.code === 'EADDRINUSE') {
+            console.error(`\n[SERVER] ERROR: Port ${currentPort} is already in use (EADDRINUSE).`);
+            
+            const isProduction = process.env.NODE_ENV === 'production';
+            if (isProduction) {
+              console.error(`[SERVER] Critical: Under production mode, we cannot bind to occupied port ${currentPort}.`);
+              console.error('[SERVER] Remediation: Please terminate any processes running on this port or select another port.\n');
+              process.exit(1);
+            } else {
+              console.warn(`[SERVER] Warning: Port ${currentPort} is occupied in development. Attempting fallback to port ${currentPort + 1}...`);
+              currentPort++;
+              serverInstance.removeAllListeners('listening');
+              tryListen();
+            }
+          } else {
+            console.error('[SERVER] Critical server error during listen:', err.message);
+            process.exit(1);
+          }
+        });
+
+        serverInstance.once('listening', () => {
+          resolve(currentPort);
+        });
+
+        serverInstance.listen(currentPort, host);
+      }
+
+      tryListen();
     });
+
+    activeServer = serverInstance;
+    
     initGateway(activeServer);
+    console.log('[SERVER] WebSocket started...');
+    console.log(`[SERVER] Server listening on http://${host}:${actualPort}`);
 
   } catch (error) {
-    console.error('[SERVER] Critical startup error:', error);
+    console.error('\n🛑 [SERVER] Critical startup error:');
+    console.error(`   - Error Name: ${error.name || 'Error'}`);
+    console.error(`   - Message: ${error.message || error}`);
+    console.error('   - Actionable Remediation: Please check your database lock files, configuration variables, and process limits.\n');
     process.exit(1);
   }
 }

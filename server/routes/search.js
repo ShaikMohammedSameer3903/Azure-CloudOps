@@ -6,6 +6,7 @@ const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db/database');
 const { subscriptionAccessClause } = require('../middleware/subscriptionSecurity');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 router.get('/', async (req, res) => {
   const { q } = req.query;
@@ -60,8 +61,8 @@ router.get('/', async (req, res) => {
       audit
     });
   } catch (error) {
-    console.error('[SEARCH] Global search failed:', error);
-    res.status(500).json({ error: 'Search query failed.' });
+    const classified = classifyCloudError(error, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

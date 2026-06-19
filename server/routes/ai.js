@@ -5,6 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const { askChatbot } = require('../services/aiService');
+const { classifyCloudError } = require('../middleware/errorClassifier');
 
 // 1. POST /api/ai/chat - Prompt the AI copilot
 router.post('/chat', async (req, res) => {
@@ -18,8 +19,8 @@ router.post('/chat', async (req, res) => {
     const response = await askChatbot(req.tenantId, message);
     res.json(response);
   } catch (error) {
-    console.error('[ROUTES] POST /ai/chat failed:', error);
-    res.status(500).json({ error: 'AI Assistant failed: ' + error.message });
+    const classified = classifyCloudError(error, 'unknown');
+    res.status(classified.status).json(classified.body);
   }
 });
 

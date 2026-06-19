@@ -16,6 +16,7 @@ const { NetworkManagementClient } = require('@azure/arm-network');
 const { AuthorizationManagementClient } = require('@azure/arm-authorization');
 const { KeyVaultManagementClient } = require('@azure/arm-keyvault');
 const { getDatabase } = require('../db/database');
+const secretsManager = require('./secretsManager');
 
 const clientCache = new Map();
 
@@ -123,7 +124,7 @@ async function getAzureClients(tenantId, subscriptionId, userAccessToken = null)
     const credential = new ClientSecretCredential(
       sub.azure_tenant_id,
       sub.client_id,
-      sub.client_secret
+      secretsManager.decryptSecret(sub.client_secret)
     );
 
     const realSubId = sub.subscription_id;
@@ -170,7 +171,7 @@ async function getOboClients(tenantId, subscriptionId, userAccessToken) {
   const oboCredential = new OnBehalfOfCredential({
     tenantId: sub.azure_tenant_id,
     clientId: sub.client_id,
-    clientSecret: sub.client_secret,
+    clientSecret: secretsManager.decryptSecret(sub.client_secret),
     userAssertionToken: userAccessToken
   });
 

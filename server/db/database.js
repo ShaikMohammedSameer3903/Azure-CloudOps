@@ -50,19 +50,8 @@ class AsyncSQLiteDB {
     }
   }
 
-  transaction(fn) {
-    return async (...args) => {
-      // Very basic transaction wrapper, as there was no transaction usage anyway
-      await this._db.run('BEGIN TRANSACTION');
-      try {
-        const res = await fn(...args);
-        await this._db.run('COMMIT');
-        return res;
-      } catch (err) {
-        await this._db.run('ROLLBACK');
-        throw err;
-      }
-    };
+  async transaction(fn) {
+    throw new Error('Transactions are not supported by this database abstraction layer.');
   }
 
   close() {
@@ -107,8 +96,7 @@ class AsyncPgDB {
   }
 
   async transaction(fn) {
-    // Simple mock of SQLite transaction for pg, full support would require a dedicated client
-    return fn();
+    throw new Error('Transactions are not supported by this database abstraction layer.');
   }
 
   close() {
@@ -299,17 +287,7 @@ async function getDatabase() {
           FROM azure_subscriptions
         `);
 
-        // Add new columns if they don't exist (Phase 4.5)
-        const caColumns = await db.all('PRAGMA table_info(cloud_accounts)');
-        const caColNames = caColumns.map(c => c.name);
-        const newCols = [
-          { name: 'role_arn', sql: 'ALTER TABLE cloud_accounts ADD COLUMN role_arn TEXT' },
-          { name: 'external_id', sql: 'ALTER TABLE cloud_accounts ADD COLUMN external_id TEXT' },
-          { name: 'access_key_id', sql: 'ALTER TABLE cloud_accounts ADD COLUMN access_key_id TEXT' },
-          { name: 'secret_access_key', sql: 'ALTER TABLE cloud_accounts ADD COLUMN secret_access_key TEXT' },
-          { name: 'session_token', sql: 'ALTER TABLE cloud_accounts ADD COLUMN session_token TEXT' },
-          { name: 'last_sync', sql: 'ALTER TABLE cloud_accounts ADD COLUMN last_sync DATETIME' },
-        ];
+
         for (const col of newCols) {
           if (!caColNames.includes(col.name)) {
             console.log(`[DB] Migrating: Adding ${col.name} column to cloud_accounts`);

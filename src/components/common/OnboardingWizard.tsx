@@ -208,18 +208,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         }
         addLog('success', `✓ Store updated with ${updatedSubs.length} subscription(s)`);
       } catch (storeErr: any) {
-        addLog('warn', `Could not refresh subscription store: ${storeErr?.message}`);
-        // Merge discovered subs into store directly
-        const fakeSubs = armSubs.map(s => ({
-          id: s.subscriptionId,
-          subscription_id: s.subscriptionId,
-          name: s.displayName,
-          displayName: s.displayName,
-          status: s.state,
-          azure_state: s.state,
-          auth_type: 'MSAL',
-        }));
-        setSubscriptions(fakeSubs as any);
+        addLog('error', `Could not refresh subscription store: ${storeErr?.message}`);
+        throw new Error('Failed to load subscriptions from server after registration.', { cause: storeErr });
       }
 
       addLog('success', `Discovery complete. ${armSubs.length} subscription(s) ready.`);

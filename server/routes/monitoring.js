@@ -15,7 +15,7 @@ const { getCloudHealthScore } = require('../services/cloudHealthService');
 const { getCache, setCache } = require('../services/cacheService');
 const ProviderFactory = require('../providers/ProviderFactory');
 
-const { verifySubscriptionAccess, logSecurityEvent } = require('../middleware/subscriptionSecurity');
+const { verifySubscriptionAccess, logSecurityEvent, isAdminRole } = require('../middleware/subscriptionSecurity');
 
 // Helper: verify subscription access with security isolation
 async function verifySubscription(tenantId, userId, userRole, subId) {
@@ -24,6 +24,25 @@ async function verifySubscription(tenantId, userId, userRole, subId) {
     console.warn(`[SECURITY] DENIED subscription access: user=${userId} role=${userRole} sub=${subId}`);
   }
   return sub;
+}
+
+// Helper: Retrieve AWS / GCP accounts based on user role
+async function getCloudAccountsForUser(tenantId, userId, userRole, provider, accountId = null) {
+  const db = await getDatabase();
+  let query = 'SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ?';
+  const params = [tenantId, provider];
+
+  if (accountId) {
+    query += ' AND (id = ? OR account_id = ? OR subscription_id = ?)';
+    params.push(accountId, accountId, accountId);
+  }
+
+  if (!isAdminRole(userRole)) {
+    query += ' AND user_id = ?';
+    params.push(userId);
+  }
+
+  return accountId ? await db.get(query, params) : await db.all(query, params);
 }
 
 // ── 1. GET /api/monitoring/metrics ──────────────────────────
@@ -42,13 +61,7 @@ router.get('/metrics', async (req, res) => {
       const resource = await db.get('SELECT * FROM resources WHERE id = ?', [resourceId]);
       if (!resource) return res.status(404).json({ error: 'Resource not found' });
       
-      let accQuery = 'SELECT * FROM cloud_accounts WHERE id = ? AND tenant_id = ?';
-      const accParams = [resource.cloud_account_id, req.tenantId];
-      if (req.userRole !== 'Admin' && req.userRole !== 'SuperAdmin') {
-        accQuery += ' AND user_id = ?';
-        accParams.push(req.userId);
-      }
-      const account = await db.get(accQuery, accParams);
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', resource.cloud_account_id);
       if (!account) return res.status(404).json({ error: 'Cloud account not found or access denied' });
 
       const ProviderFactory = require('../providers/ProviderFactory');
@@ -182,9 +195,7 @@ router.get('/cost', async (req, res) => {
   // AWS Cost — use real AwsCostService
   if (provider === 'aws') {
     try {
-      const db = await getDatabase();
-      const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND (id = ? OR account_id = ?) AND user_id = ?',
-        [req.tenantId, 'aws', subscriptionId, subscriptionId, req.userId]);
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId);
       if (!account) return res.status(404).json({ error: 'AWS Account not found or access denied' });
 
       const ProviderFactory = require('../providers/ProviderFactory');
@@ -204,6 +215,23 @@ router.get('/cost', async (req, res) => {
     } catch (err) {
       const { classifyCloudError } = require('../middleware/errorClassifier');
       const classified = classifyCloudError(err, 'aws');
+      return res.status(classified.status).json({ ...classified.body, costUnavailable: true });
+    }
+  }
+
+  if (provider === 'gcp') {
+    try {
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'GCP Project not found or access denied' });
+
+      const ProviderFactory = require('../providers/ProviderFactory');
+      const providerInstance = ProviderFactory.getProvider(account);
+      const costData = await providerInstance.getCost();
+
+      return res.json(costData);
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const classified = classifyCloudError(err, 'gcp');
       return res.status(classified.status).json({ ...classified.body, costUnavailable: true });
     }
   }
@@ -229,9 +257,19 @@ router.get('/backup', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      const db = await getDatabase();
-      const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND id = ?', [req.tenantId, 'aws', subscriptionId]);
-      if (!account) return res.status(404).json({ error: 'AWS Account not found' });
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'AWS Account not found or access denied' });
+      const ProviderFactory = require('../providers/ProviderFactory');
+      const providerInstance = ProviderFactory.getProvider(account);
+      const backup = await providerInstance.getBackup();
+      return res.json(backup);
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  if (provider === 'gcp') {
+    try {
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'GCP Project not found or access denied' });
       const ProviderFactory = require('../providers/ProviderFactory');
       const providerInstance = ProviderFactory.getProvider(account);
       const backup = await providerInstance.getBackup();
@@ -260,13 +298,12 @@ router.get('/alerts', async (req, res) => {
 
   if (provider === 'aws') {
     try {
-      const db = await getDatabase();
       let awsAccounts = [];
       if (subscriptionId) {
-        const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND (id = ? OR subscription_id = ? OR account_id = ?) AND user_id = ?', [req.tenantId, subscriptionId, subscriptionId, subscriptionId, req.userId]);
+        const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId);
         if (account) awsAccounts.push(account);
       } else {
-        awsAccounts = await db.all("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active'", [req.tenantId, req.userId]);
+        awsAccounts = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws');
       }
       
       const allAlarms = [];
@@ -294,6 +331,41 @@ router.get('/alerts', async (req, res) => {
     }
   }
 
+  if (provider === 'gcp') {
+    try {
+      let gcpAccounts = [];
+      if (subscriptionId) {
+        const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId);
+        if (account) gcpAccounts.push(account);
+      } else {
+        gcpAccounts = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp');
+      }
+
+      const allAlarms = [];
+      const ProviderFactory = require('../providers/ProviderFactory');
+      for (const account of gcpAccounts) {
+        try {
+          const providerInstance = ProviderFactory.getProvider(account);
+          const alarms = await providerInstance.getAlarms();
+          allAlarms.push(...alarms.map(a => ({
+            ...a,
+            accountName: account.account_name,
+            severity: a.state === 'ALARM' ? 'Critical' : 'Low',
+            condition: `${a.metricName} ${a.comparisonOperator} ${a.threshold}`,
+            description: `GCP alert policy: ${a.name}`
+          })));
+        } catch (err) {
+          console.warn(`[Unified] getAlarms failed for GCP account ${account.account_name}:`, err.message);
+        }
+      }
+      return res.json(allAlarms);
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'gcp');
+      res.status(status).json(payload);
+    }
+  }
+
   const userAccessToken = req.azureAccessToken || req.headers['x-azure-token'] || null;
   if (!subscriptionId) return res.status(400).json({ error: 'subscriptionId is required for Azure.' });
   try {
@@ -314,9 +386,8 @@ router.get('/defender', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      const db = await getDatabase();
-      const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND id = ?', [req.tenantId, 'aws', subscriptionId]);
-      if (!account) return res.status(404).json({ error: 'AWS Account not found' });
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'AWS Account not found or access denied.' });
       const ProviderFactory = require('../providers/ProviderFactory');
       const providerInstance = ProviderFactory.getProvider(account);
       const sec = await providerInstance.getSecurity();
@@ -330,6 +401,27 @@ router.get('/defender', async (req, res) => {
     } catch (err) {
       const { classifyCloudError } = require('../middleware/errorClassifier');
       const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
+    }
+  }
+
+  if (provider === 'gcp') {
+    try {
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'GCP Project not found or access denied.' });
+      const ProviderFactory = require('../providers/ProviderFactory');
+      const providerInstance = ProviderFactory.getProvider(account);
+      const sec = await providerInstance.getSecurity();
+      return res.json({
+        secureScore: sec.securityScore || { percentage: 100 },
+        recommendations: [],
+        alerts: sec.findings || [],
+        compliance: [],
+        errors: {}
+      });
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'gcp');
       res.status(status).json(payload);
     }
   }
@@ -371,9 +463,8 @@ router.get('/advisor', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      const db = await getDatabase();
-      const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND id = ?', [req.tenantId, 'aws', subscriptionId]);
-      if (!account) return res.status(404).json({ error: 'AWS Account not found' });
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'AWS Account not found or access denied.' });
       const ProviderFactory = require('../providers/ProviderFactory');
       const providerInstance = ProviderFactory.getProvider(account);
       const adv = await providerInstance.getAdvisor();
@@ -381,6 +472,21 @@ router.get('/advisor', async (req, res) => {
     } catch (err) {
       const { classifyCloudError } = require('../middleware/errorClassifier');
       const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
+    }
+  }
+
+  if (provider === 'gcp') {
+    try {
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'GCP Project not found or access denied.' });
+      const ProviderFactory = require('../providers/ProviderFactory');
+      const providerInstance = ProviderFactory.getProvider(account);
+      const adv = await providerInstance.getAdvisor();
+      return res.json({ recommendations: adv.recommendations || [], score: { score: 100 } });
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'gcp');
       res.status(status).json(payload);
     }
   }
@@ -424,9 +530,8 @@ router.get('/health', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      const db = await getDatabase();
-      const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND id = ?', [req.tenantId, 'aws', subscriptionId]);
-      if (!account) return res.status(404).json({ error: 'AWS Account not found' });
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'AWS Account not found or access denied.' });
       const ProviderFactory = require('../providers/ProviderFactory');
       const providerInstance = ProviderFactory.getProvider(account);
       const health = await providerInstance.getHealth();
@@ -434,6 +539,21 @@ router.get('/health', async (req, res) => {
     } catch (err) {
       const { classifyCloudError } = require('../middleware/errorClassifier');
       const { status, payload } = classifyCloudError(err, 'aws');
+      res.status(status).json(payload);
+    }
+  }
+
+  if (provider === 'gcp') {
+    try {
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'GCP Project not found or access denied.' });
+      const ProviderFactory = require('../providers/ProviderFactory');
+      const providerInstance = ProviderFactory.getProvider(account);
+      const health = await providerInstance.getHealth();
+      return res.json({ serviceHealth: health.events, resourceHealth: [], plannedMaintenance: [] });
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'gcp');
       res.status(status).json(payload);
     }
   }
@@ -475,12 +595,7 @@ router.get('/risk', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      // Real risk calculation from Security Hub findings
-      const db = await getDatabase();
-      const accounts = await db.all(
-        "SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active'",
-        [req.tenantId, req.userId]
-      );
+      const accounts = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws');
       let totalFindings = 0;
       let criticalCount = 0;
       let highCount = 0;
@@ -524,6 +639,52 @@ router.get('/risk', async (req, res) => {
     }
   }
 
+  if (provider === 'gcp') {
+    try {
+      const accounts = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp');
+      let totalFindings = 0;
+      let criticalCount = 0;
+      let highCount = 0;
+      const factors = [];
+
+      for (const account of accounts) {
+        try {
+          const providerInstance = ProviderFactory.getProvider(account);
+          const secData = await providerInstance.getSecurity();
+          totalFindings += secData.totalFindings || 0;
+          criticalCount += secData.criticalAlerts || 0;
+          highCount += secData.highAlerts || 0;
+          if (secData.criticalAlerts > 0) {
+            factors.push({ factor: `${secData.criticalAlerts} critical findings in ${account.account_name}`, impact: 'Critical', provider: 'gcp' });
+          }
+          if (secData.highAlerts > 0) {
+            factors.push({ factor: `${secData.highAlerts} high-severity findings in ${account.account_name}`, impact: 'High', provider: 'gcp' });
+          }
+        } catch (err) {
+          factors.push({ factor: `Security scan failed for ${account.account_name}: ${err.message}`, impact: 'Unknown', provider: 'gcp' });
+        }
+      }
+
+      // Calculate real risk score: base 10 + 15 per critical + 5 per high
+      const overallRiskScore = Math.min(100, 10 + (criticalCount * 15) + (highCount * 5));
+
+      return res.json({
+        overallRiskScore: accounts.length > 0 ? overallRiskScore : null,
+        totalFindings,
+        criticalCount,
+        highCount,
+        factors,
+        provider: 'gcp',
+        accountsScanned: accounts.length,
+        noAccountsConfigured: accounts.length === 0
+      });
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'gcp');
+      res.status(status).json(payload);
+    }
+  }
+
   const { resourceGroup } = req.query;
   const userAccessToken = req.azureAccessToken || req.headers['x-azure-token'] || null;
   if (!subscriptionId) return res.status(400).json({ error: 'subscriptionId is required.' });
@@ -545,13 +706,9 @@ router.get('/cloud-health', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      // Real AWS Health Dashboard data
-      const db = await getDatabase();
       const account = subscriptionId
-        ? await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND (id = ? OR account_id = ?) AND user_id = ?',
-          [req.tenantId, 'aws', subscriptionId, subscriptionId, req.userId])
-        : await db.get("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active' LIMIT 1",
-          [req.tenantId, req.userId]);
+        ? await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId)
+        : (await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws'))?.[0];
 
       if (!account) {
         return res.json({
@@ -583,6 +740,46 @@ router.get('/cloud-health', async (req, res) => {
     } catch (e) {
       const { classifyCloudError } = require('../middleware/errorClassifier');
       const classified = classifyCloudError(e, 'aws');
+      return res.status(classified.status).json(classified.body);
+    }
+  }
+
+  if (provider === 'gcp') {
+    try {
+      const account = subscriptionId
+        ? await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId)
+        : (await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp'))?.[0];
+
+      if (!account) {
+        return res.json({
+          score: null,
+          factors: [],
+          provider: 'gcp',
+          noAccountConfigured: true,
+          message: 'No GCP project configured'
+        });
+      }
+
+      const providerInstance = ProviderFactory.getProvider(account);
+      const healthData = await providerInstance.getHealth();
+      const healthScore = healthData.events.length === 0 ? 100 : Math.max(0, 100 - (healthData.events.length * 10));
+
+      return res.json({
+        score: healthScore,
+        status: healthData.status,
+        events: healthData.events,
+        factors: healthData.events.map(e => ({
+          factor: e.title || e.eventTypeCode,
+          service: e.service,
+          region: e.region,
+          status: e.status,
+          provider: 'gcp'
+        })),
+        provider: 'gcp'
+      });
+    } catch (e) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const classified = classifyCloudError(e, 'gcp');
       return res.status(classified.status).json(classified.body);
     }
   }
@@ -628,9 +825,8 @@ router.get('/usage', async (req, res) => {
   const { subscriptionId, provider } = req.query;
   if (provider === 'aws') {
     try {
-      const db = await getDatabase();
-      const account = await db.get('SELECT * FROM cloud_accounts WHERE tenant_id = ? AND provider = ? AND id = ?', [req.tenantId, 'aws', subscriptionId]);
-      if (!account) return res.status(404).json({ error: 'AWS Account not found' });
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'aws', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'AWS Account not found or access denied.' });
       const ProviderFactory = require('../providers/ProviderFactory');
       const providerInstance = ProviderFactory.getProvider(account);
       const usage = await providerInstance.getUsage();
@@ -638,6 +834,21 @@ router.get('/usage', async (req, res) => {
     } catch (err) {
       const { classifyCloudError } = require('../middleware/errorClassifier');
       const { status, payload } = classifyCloudError(err, 'aws');
+      return res.status(status).json(payload);
+    }
+  }
+
+  if (provider === 'gcp') {
+    try {
+      const account = await getCloudAccountsForUser(req.tenantId, req.userId, req.userRole, 'gcp', subscriptionId);
+      if (!account) return res.status(404).json({ error: 'GCP Project not found or access denied.' });
+      const ProviderFactory = require('../providers/ProviderFactory');
+      const providerInstance = ProviderFactory.getProvider(account);
+      const usage = await providerInstance.getUsage();
+      return res.json(usage);
+    } catch (err) {
+      const { classifyCloudError } = require('../middleware/errorClassifier');
+      const { status, payload } = classifyCloudError(err, 'gcp');
       return res.status(status).json(payload);
     }
   }
@@ -662,19 +873,39 @@ router.get('/usage', async (req, res) => {
 // Aggregate data from all connected cloud accounts
 // ============================================================
 
-// Helper: Get all AWS accounts for a tenant and run a provider method with strict user isolation
-async function aggregateAwsData(tenantId, userId, methodName, ...args) {
-  const db = await getDatabase();
-  const awsAccounts = await db.all("SELECT * FROM cloud_accounts WHERE tenant_id = ? AND user_id = ? AND provider = 'aws' AND status = 'Active'", [tenantId, userId]);
+// Helper: Get all AWS accounts for a tenant and run a provider method with role-based scoping
+async function aggregateAwsData(tenantId, userId, userRole, methodName, ...args) {
+  const awsAccounts = await getCloudAccountsForUser(tenantId, userId, userRole, 'aws');
   const results = [];
 
   for (const account of awsAccounts) {
+    if (account.status !== 'Active') continue;
     try {
       const provider = ProviderFactory.getProvider(account);
       const data = await provider[methodName](...args);
       results.push({ account, data });
     } catch (err) {
       console.warn(`[Unified] ${methodName} failed for AWS account ${account.account_name}:`, err.message);
+    }
+  }
+  return results;
+}
+
+// Helper: Get all GCP projects for a tenant and run a provider method with role-based scoping
+async function aggregateGcpData(tenantId, userId, userRole, methodName, ...args) {
+  const gcpAccounts = await getCloudAccountsForUser(tenantId, userId, userRole, 'gcp');
+  const results = [];
+
+  for (const account of gcpAccounts) {
+    if (account.status !== 'Active') continue;
+    try {
+      const provider = ProviderFactory.getProvider(account);
+      if (typeof provider[methodName] === 'function') {
+        const data = await provider[methodName](...args);
+        results.push({ account, data });
+      }
+    } catch (err) {
+      console.warn(`[Unified] ${methodName} failed for GCP project ${account.account_name}:`, err.message);
     }
   }
   return results;
@@ -692,15 +923,23 @@ router.get('/security/unified', async (req, res) => {
     let totalScore = 0;
     let scoreCount = 0;
 
-    // Azure data (if not filtered to aws only)
-    if (provider !== 'aws') {
+    // Azure data
+    if (!provider || provider === 'azure' || provider === 'all') {
       try {
         const db = await getDatabase();
-                let azureSubs = [];
-        if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
-        } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+        let azureSubs = [];
+        if (isAdminRole(req.userRole)) {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          }
+        } else {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+          }
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -726,10 +965,24 @@ router.get('/security/unified', async (req, res) => {
       } catch (err) { console.warn('[Unified Security] Azure fetch failed:', err.message); }
     }
 
-    // AWS data (if not filtered to azure only)
-    if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getSecurity');
+    // AWS data
+    if (!provider || provider === 'aws' || provider === 'all') {
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, req.userRole, 'getSecurity');
       for (const { account, data } of awsResults) {
+        if (data.securityScore?.percentage) {
+          totalScore += data.securityScore.percentage;
+          scoreCount++;
+        }
+        for (const finding of (data.findings || [])) {
+          allFindings.push({ ...finding, accountName: account.account_name });
+        }
+      }
+    }
+
+    // GCP data
+    if (!provider || provider === 'gcp' || provider === 'all') {
+      const gcpResults = await aggregateGcpData(req.tenantId, req.userId, req.userRole, 'getSecurity');
+      for (const { account, data } of gcpResults) {
         if (data.securityScore?.percentage) {
           totalScore += data.securityScore.percentage;
           scoreCount++;
@@ -775,14 +1028,22 @@ router.get('/cost/unified', async (req, res) => {
     const details = [];
 
     // Azure cost
-    if (provider !== 'aws') {
+    if (!provider || provider === 'azure' || provider === 'all') {
       try {
         const db = await getDatabase();
-                let azureSubs = [];
-        if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
-        } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+        let azureSubs = [];
+        if (isAdminRole(req.userRole)) {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          }
+        } else {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+          }
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -805,13 +1066,31 @@ router.get('/cost/unified', async (req, res) => {
     }
 
     // AWS cost
-    if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getCost');
+    if (!provider || provider === 'aws' || provider === 'all') {
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, req.userRole, 'getCost');
       for (const { account, data } of awsResults) {
         totalCost += data.currentMonthCost || 0;
         totalForecast += data.forecastCost || 0;
         details.push({
           provider: 'aws',
+          accountName: account.account_name,
+          accountId: account.account_id,
+          cost: data.currentMonthCost || 0,
+          currency: 'USD',
+          forecast: data.forecastCost || 0,
+          breakdown: data.breakdown || [],
+        });
+      }
+    }
+
+    // GCP cost
+    if (!provider || provider === 'gcp' || provider === 'all') {
+      const gcpResults = await aggregateGcpData(req.tenantId, req.userId, req.userRole, 'getCost');
+      for (const { account, data } of gcpResults) {
+        totalCost += data.currentMonthCost || 0;
+        totalForecast += data.forecastCost || 0;
+        details.push({
+          provider: 'gcp',
           accountName: account.account_name,
           accountId: account.account_id,
           cost: data.currentMonthCost || 0,
@@ -852,14 +1131,22 @@ router.get('/compliance/unified', async (req, res) => {
     const allFindings = [];
 
     // Azure compliance
-    if (provider !== 'aws') {
+    if (!provider || provider === 'azure' || provider === 'all') {
       try {
         const db = await getDatabase();
-                let azureSubs = [];
-        if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
-        } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+        let azureSubs = [];
+        if (isAdminRole(req.userRole)) {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          }
+        } else {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+          }
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -878,10 +1165,21 @@ router.get('/compliance/unified', async (req, res) => {
     }
 
     // AWS compliance
-    if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getCompliance', framework || 'HIPAA');
+    if (!provider || provider === 'aws' || provider === 'all') {
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, req.userRole, 'getCompliance', framework || 'HIPAA');
       for (const { account, data } of awsResults) {
-        if (data.score !== undefined) { totalScore += data.score; scoreCount++; }
+        if (data.score !== undefined && data.score !== null) { totalScore += data.score; scoreCount++; }
+        totalControls += data.totalControls || 0;
+        failedControls += data.failedControls || 0;
+        allFindings.push(...(data.findings || []).map(f => ({ ...f, accountName: account.account_name })));
+      }
+    }
+
+    // GCP compliance
+    if (!provider || provider === 'gcp' || provider === 'all') {
+      const gcpResults = await aggregateGcpData(req.tenantId, req.userId, req.userRole, 'getCompliance', framework || 'HIPAA');
+      for (const { account, data } of gcpResults) {
+        if (data.score !== undefined && data.score !== null) { totalScore += data.score; scoreCount++; }
         totalControls += data.totalControls || 0;
         failedControls += data.failedControls || 0;
         allFindings.push(...(data.findings || []).map(f => ({ ...f, accountName: account.account_name })));
@@ -942,8 +1240,10 @@ router.get('/executive', async (req, res) => {
 
     const azureAccounts = accounts.filter(a => a.provider === 'azure').length;
     const awsAccounts = accounts.filter(a => a.provider === 'aws').length;
+    const gcpAccounts = accounts.filter(a => a.provider === 'gcp').length;
     const azureResources = resources.filter(r => (r.provider || 'azure') === 'azure').length;
     const awsResources = resources.filter(r => r.provider === 'aws').length;
+    const gcpResources = resources.filter(r => r.provider === 'gcp').length;
     const openIncidents = incidents.filter(i => i.status !== 'Closed' && i.status !== 'Resolved').length;
     const criticalIncidents = incidents.filter(i => i.severity === 'CRITICAL' || i.severity === 'SEV0').length;
 
@@ -951,9 +1251,11 @@ router.get('/executive', async (req, res) => {
       totalCloudAccounts: accounts.length,
       azureAccounts,
       awsAccounts,
+      gcpAccounts,
       totalResources: resources.length,
       azureResources,
       awsResources,
+      gcpResources,
       monthlySpend: 0,
       forecastSpend: 0,
       complianceScore: 0,
@@ -979,11 +1281,21 @@ router.get('/audit/unified', async (req, res) => {
     const allEvents = [];
 
     // AWS CloudTrail
-    if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getAuditLogs');
+    if (!provider || provider === 'aws' || provider === 'all') {
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, req.userRole, 'getAuditLogs');
       for (const { account, data } of awsResults) {
         for (const event of (data || [])) {
-          allEvents.push({ ...event, accountName: account.account_name });
+          allEvents.push({ ...event, accountName: account.account_name, provider: 'aws' });
+        }
+      }
+    }
+
+    // GCP Audit Logs
+    if (!provider || provider === 'gcp' || provider === 'all') {
+      const gcpResults = await aggregateGcpData(req.tenantId, req.userId, req.userRole, 'getAuditLogs');
+      for (const { account, data } of gcpResults) {
+        for (const event of (data || [])) {
+          allEvents.push({ ...event, accountName: account.account_name, provider: 'gcp' });
         }
       }
     }
@@ -1011,14 +1323,22 @@ router.get('/backup/unified', async (req, res) => {
     const details = [];
 
     // Azure backup
-    if (provider !== 'aws') {
+    if (!provider || provider === 'azure' || provider === 'all') {
       try {
         const db = await getDatabase();
-                let azureSubs = [];
-        if (scope !== 'ALL' && scope.startsWith('azure-')) {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
-        } else if (scope === 'ALL') {
-          azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+        let azureSubs = [];
+        if (isAdminRole(req.userRole)) {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ?', [scope, req.tenantId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ?', [req.tenantId]);
+          }
+        } else {
+          if (scope !== 'ALL' && scope.startsWith('azure-')) {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE id = ? AND tenant_id = ? AND user_id = ?', [scope, req.tenantId, req.userId]);
+          } else {
+            azureSubs = await db.all('SELECT * FROM azure_subscriptions WHERE tenant_id = ? AND user_id = ?', [req.tenantId, req.userId]);
+          }
         }
         if (azureSubs.length > 0) {
           const sub = azureSubs[0];
@@ -1042,8 +1362,8 @@ router.get('/backup/unified', async (req, res) => {
     }
 
     // AWS Backup
-    if (provider !== 'azure') {
-      const awsResults = await aggregateAwsData(req.tenantId, req.userId, 'getBackup');
+    if (!provider || provider === 'aws' || provider === 'all') {
+      const awsResults = await aggregateAwsData(req.tenantId, req.userId, req.userRole, 'getBackup');
       for (const { account, data } of awsResults) {
         totalProtected += data.totalProtectedItems || 0;
         totalHealthy += data.healthyItems || 0;
@@ -1055,6 +1375,29 @@ router.get('/backup/unified', async (req, res) => {
         allJobs.push(...(data.recentJobs || []).map(j => ({ ...j, provider: 'aws', accountName: account.account_name })));
         details.push({
           provider: 'aws',
+          accountName: account.account_name,
+          protectedItems: data.totalProtectedItems || 0,
+          healthyItems: data.healthyItems || 0,
+          failedJobs: data.failedJobs || 0,
+          lastBackup: data.lastBackupTime,
+        });
+      }
+    }
+
+    // GCP Backup
+    if (!provider || provider === 'gcp' || provider === 'all') {
+      const gcpResults = await aggregateGcpData(req.tenantId, req.userId, req.userRole, 'getBackup');
+      for (const { account, data } of gcpResults) {
+        totalProtected += data.totalProtectedItems || 0;
+        totalHealthy += data.healthyItems || 0;
+        totalFailed += data.failedJobs || 0;
+        totalRecoveryPoints += data.recoveryPoints || 0;
+        if (data.lastBackupTime && (!latestBackup || new Date(data.lastBackupTime) > new Date(latestBackup))) {
+          latestBackup = data.lastBackupTime;
+        }
+        allJobs.push(...(data.recentJobs || []).map(j => ({ ...j, provider: 'gcp', accountName: account.account_name })));
+        details.push({
+          provider: 'gcp',
           accountName: account.account_name,
           protectedItems: data.totalProtectedItems || 0,
           healthyItems: data.healthyItems || 0,
