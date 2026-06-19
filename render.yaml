@@ -1,0 +1,76 @@
+##############################################################
+# Render Deployment Blueprint
+# Deploys:
+#   - name-azure-cloudops-api  → Node.js backend API
+#   - Render PostgreSQL        → Persistent database
+##############################################################
+
+services:
+  - type: web
+    name: name-azure-cloudops-api
+    runtime: node
+    rootDir: server
+    plan: free
+    region: oregon
+
+    buildCommand: npm install
+    startCommand: node --max-old-space-size=400 index.js
+
+    healthCheckPath: /api/health
+
+    envVars:
+      # ── Database (auto-linked from the db below) ──────────────
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cloudops-postgres
+          property: connectionString
+
+      # ── Auth ──────────────────────────────────────────────────
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+
+      # ── Server ────────────────────────────────────────────────
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+
+      # ── CORS / Frontend Origin ─────────────────────────────────
+      # Set this to your Vercel/Netlify frontend URL once deployed
+      - key: FRONTEND_URL
+        value: https://your-frontend.vercel.app
+
+      # ── Azure Credentials (set manually in Render dashboard) ──
+      - key: AZURE_TENANT_ID
+        sync: false
+      - key: AZURE_CLIENT_ID
+        sync: false
+      - key: AZURE_CLIENT_SECRET
+        sync: false
+      - key: AZURE_SUBSCRIPTION_ID
+        sync: false
+
+      # ── Local Admin (set manually in Render dashboard) ────────
+      - key: LOCAL_ADMIN_EMAIL
+        sync: false
+      - key: LOCAL_ADMIN_PASSWORD_HASH
+        sync: false
+
+      # ── OAuth (set manually in Render dashboard) ──────────────
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+
+databases:
+  - name: cloudops-postgres
+    plan: free
+    region: oregon
+    databaseName: cloudops
+    user: cloudops_admin

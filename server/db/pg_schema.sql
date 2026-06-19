@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS tenants (
 
 -- 1.5. Roles and Permissions
 CREATE TABLE IF NOT EXISTS roles (
+    id TEXT PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL,
+    description TEXT
+);
+
 CREATE TABLE IF NOT EXISTS permissions (
     id TEXT PRIMARY KEY,
     role_id TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
